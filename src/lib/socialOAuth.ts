@@ -1,3 +1,4 @@
+////src/lib/socialOAuth.ts
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const STATE_MAX_AGE_MS = 10 * 60 * 1000;

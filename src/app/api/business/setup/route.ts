@@ -40,6 +40,15 @@ function toId(value: unknown): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+// Reads the first field that is present (supports old and new field names)
+function pick(formData: FormData, ...keys: string[]): FormDataEntryValue | null {
+  for (const key of keys) {
+    const value = formData.get(key);
+    if (value !== null && value !== '') return value;
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const payload = getAuthPayload(req);
@@ -53,8 +62,8 @@ export async function POST(req: NextRequest) {
     const contentType = req.headers.get('content-type') || '';
 
     let name = '';
-    let category = ''; // category NAME (kept for older code that reads users.category)
-    let categoryId: number | null = null; // main business category id
+    let businessCategory = ''; // category NAME -> users.business_category
+    let businessCategoryId: number | null = null; // -> users.business_category_id
     let city = '';
     let website = '';
     let language = '';
@@ -63,8 +72,8 @@ export async function POST(req: NextRequest) {
     if (contentType.includes('application/json')) {
       const body = await req.json();
       name = String(body?.name || '').trim();
-      category = String(body?.category || '').trim();
-      categoryId = toId(body?.categoryId);
+      businessCategory = String(body?.business_category || body?.category || '').trim();
+      businessCategoryId = toId(body?.businessCategoryId ?? body?.categoryId);
       city = String(body?.city || '').trim();
       website = String(body?.website || '').trim();
       language = String(body?.language || '').trim();
@@ -72,8 +81,8 @@ export async function POST(req: NextRequest) {
     } else {
       const formData = await req.formData();
       name = String(formData.get('name') || '').trim();
-      category = String(formData.get('category') || '').trim();
-      categoryId = toId(formData.get('categoryId'));
+      businessCategory = String(pick(formData, 'business_category', 'category') || '').trim();
+      businessCategoryId = toId(pick(formData, 'businessCategoryId', 'categoryId'));
       city = String(formData.get('city') || '').trim();
       website = String(formData.get('website') || '').trim();
       language = String(formData.get('language') || '').trim();
@@ -82,7 +91,7 @@ export async function POST(req: NextRequest) {
 
     // Subcategory / child category are NOT saved here anymore —
     // the user picks them per product on the Upload page.
-    if (!name || !categoryId || !city) {
+    if (!name || !businessCategoryId || !city) {
       return NextResponse.json(
         { error: 'Business name, category and city are required' },
         { status: 400 }
@@ -94,19 +103,19 @@ export async function POST(req: NextRequest) {
     const [cat] = await db
       .select({ id: categories.id, name: categories.name })
       .from(categories)
-      .where(eq(categories.id, categoryId))
+      .where(eq(categories.id, businessCategoryId))
       .limit(1);
 
     if (!cat) {
       return NextResponse.json({ error: 'Invalid category' }, { status: 400 });
     }
 
-    category = cat.name;
+    businessCategory = cat.name;
 
     const updateData: Partial<typeof users.$inferInsert> = {
       name,
-      category,
-      categoryId: cat.id,
+      business_category: businessCategory,
+      businessCategoryId: cat.id,
       city,
       website,
       language,
@@ -156,8 +165,8 @@ export async function POST(req: NextRequest) {
         email: users.email,
         plan: users.plan,
         credits: users.credits,
-        category: users.category,
-        categoryId: users.categoryId,
+        business_category: users.business_category,
+        businessCategoryId: users.businessCategoryId,
         city: users.city,
         website: users.website,
         language: users.language,

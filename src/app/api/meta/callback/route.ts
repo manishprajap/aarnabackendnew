@@ -1,62 +1,56 @@
-///src/app/api/meta/callback/route.ts
+// src/app/api/meta/callback/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { instagramConnections, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import {
+  getEnv,
+  getMetaConfig,
+  verifySignedState,
+} from "@/lib/instagramOAuth";
 
-const INSTAGRAM_TOKEN_URL =
-  "https://api.instagram.com/oauth/access_token";
+const INSTAGRAM_TOKEN_URL = "https://api.instagram.com/oauth/access_token";
+const INSTAGRAM_GRAPH_URL = "https://graph.instagram.com";
 
-const INSTAGRAM_GRAPH_URL =
-  "https://graph.instagram.com";
+// ---------------------------------------------------------
+// Authorization codes are single-use. If the browser / a proxy / React
+// strict mode hits this route twice with the same code, the second call
+// would fail with "Error validating verification code". Track recent codes.
+// ---------------------------------------------------------
+const processedCodes = new Map<string, number>();
+const CODE_TTL_MS = 10 * 60 * 1000;
+
+function markCodeSeen(code: string): boolean {
+  const now = Date.now();
+  for (const [key, ts] of processedCodes) {
+    if (now - ts > CODE_TTL_MS) processedCodes.delete(key);
+  }
+  if (processedCodes.has(code)) return false; // duplicate
+  processedCodes.set(code, now);
+  return true;
+}
 
 function getFrontendUrl() {
   return (
-    process.env.FRONTEND_URL ||
-    process.env.NEXT_PUBLIC_FRONTEND_URL ||
+    getEnv("FRONTEND_URL") ||
+    getEnv("NEXT_PUBLIC_FRONTEND_URL") ||
     "http://localhost:8100"
   ).replace(/\/+$/, "");
 }
 
-function redirectToFrontend(
-  path: string,
-  params: Record<string, string>
-) {
+function redirectToFrontend(path: string, params: Record<string, string>) {
   const url = new URL(`${getFrontendUrl()}${path}`);
-
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
   }
-
   return NextResponse.redirect(url);
 }
 
-function decodeState(state: string) {
-  try {
-    const base64 = state
-      .replace(/-/g, "+")
-      .replace(/_/g, "/");
-
-    const padded =
-      base64 + "=".repeat((4 - (base64.length % 4)) % 4);
-
-    const json = Buffer.from(padded, "base64").toString("utf8");
-
-    return JSON.parse(json) as {
-      userId: number;
-      bannerId?: number;
-      timestamp?: number;
-    };
-  } catch (error) {
-    console.error("Failed to decode Instagram OAuth state:", error);
-    return null;
-  }
+function fail(message: string) {
+  return redirectToFrontend("/posters", { instagram: "error", message });
 }
 
 export async function GET(req: NextRequest) {
-  // TEMP DIAGNOSTICS — unique ID per request, to catch duplicate calls
-  // hitting this route with the same authorization code (a very common
-  // cause of "Error validating verification code").
   const requestId = Math.random().toString(36).slice(2, 8);
 
   console.log("========================================");
@@ -66,17 +60,16 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
 
-    const code = searchParams.get("code");
+    // Instagram may append "#_" to the code; strip it just in case.
+    const code = searchParams.get("code")?.replace(/#_$/, "") || null;
     const state = searchParams.get("state");
 
     const oauthError = searchParams.get("error");
     const oauthErrorReason = searchParams.get("error_reason");
-    const oauthErrorDescription =
-      searchParams.get("error_description");
+    const oauthErrorDescription = searchParams.get("error_description");
 
     console.log(`[${requestId}] Callback params:`, {
       hasCode: !!code,
-      codePrefix: code ? code.slice(0, 24) : null,
       codeLength: code ? code.length : 0,
       hasState: !!state,
       oauthError,
@@ -84,147 +77,99 @@ export async function GET(req: NextRequest) {
       oauthErrorDescription,
     });
 
-    // ---------------------------------------------------------
     // 1. Instagram returned an OAuth error
-    // ---------------------------------------------------------
-
     if (oauthError) {
       console.error(`[${requestId}] Instagram OAuth error:`, {
         oauthError,
         oauthErrorReason,
         oauthErrorDescription,
       });
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message:
-          oauthErrorDescription ||
+      return fail(
+        oauthErrorDescription ||
           oauthErrorReason ||
           oauthError ||
-          "instagram_oauth_error",
-      });
+          "instagram_oauth_error"
+      );
     }
 
-    // ---------------------------------------------------------
-    // 2. Validate code/state
-    // ---------------------------------------------------------
-
+    // 2. Validate code / state presence
     if (!code) {
       console.error(`[${requestId}] Instagram callback missing code`);
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_code",
-      });
+      return fail("missing_code");
     }
 
     if (!state) {
       console.error(`[${requestId}] Instagram callback missing state`);
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_state",
-      });
+      return fail("missing_state");
     }
 
-    // ---------------------------------------------------------
-    // 3. Decode OAuth state
-    // ---------------------------------------------------------
-
-    const stateData = decodeState(state);
+    // 3. Verify signed state (signature + expiry)
+    const stateData = verifySignedState(state);
 
     if (!stateData || !stateData.userId) {
-      console.error(`[${requestId}] Invalid Instagram OAuth state`);
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "invalid_state",
-      });
+      console.error(`[${requestId}] Invalid or expired Instagram OAuth state`);
+      return fail("invalid_state");
     }
 
     const userId = Number(stateData.userId);
-    const bannerId = stateData.bannerId
-      ? Number(stateData.bannerId)
-      : undefined;
-
-    console.log(`[${requestId}] Instagram OAuth belongs to user:`, userId);
-    console.log(`[${requestId}] Instagram OAuth banner:`, bannerId);
+    const bannerId = stateData.bannerId ? Number(stateData.bannerId) : undefined;
 
     if (!Number.isFinite(userId) || userId <= 0) {
       console.error(`[${requestId}] Invalid userId in OAuth state:`, userId);
+      return fail("invalid_user");
+    }
 
+    console.log(`[${requestId}] OAuth belongs to user:`, userId, "banner:", bannerId);
+
+    // 4. Duplicate-callback protection
+    if (!markCodeSeen(code)) {
+      console.warn(
+        `[${requestId}] Duplicate callback with an already-used code; ignoring`
+      );
+      // The first request is handling it; send user to the same place.
       return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "invalid_user",
+        instagram: "connected",
+        ...(bannerId ? { bannerId: String(bannerId) } : {}),
       });
     }
 
-    // ---------------------------------------------------------
-    // 4. Environment variables
-    // ---------------------------------------------------------
+    // 5. Environment variables (trimmed)
+    const { clientId, clientSecret, redirectUri } = getMetaConfig();
 
-    const clientId = process.env.META_APP_ID;
-    const clientSecret = process.env.META_APP_SECRET;
-
-    const redirectUri =
-      process.env.META_REDIRECT_URI ||
-      "https://aarnexai.com/aarnexai-backend/api/meta/callback";
-
-    // TEMP DIAGNOSTICS — compare this exactly against the connect route's
-    // redirectUriJSON / redirectUriLength in the logs.
-    console.log(`[${requestId}] Using Instagram redirect URI:`, redirectUri);
-    console.log(`[${requestId}] Redirect URI JSON:`, JSON.stringify(redirectUri));
+    console.log(`[${requestId}] Redirect URI:`, JSON.stringify(redirectUri));
     console.log(`[${requestId}] Redirect URI length:`, redirectUri.length);
-    console.log(`[${requestId}] Client ID:`, clientId);
 
     if (!clientId) {
       console.error(`[${requestId}] META_APP_ID is missing`);
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_app_id",
-      });
+      return fail("missing_app_id");
     }
 
     if (!clientSecret) {
       console.error(`[${requestId}] META_APP_SECRET is missing`);
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_app_secret",
-      });
+      return fail("missing_app_secret");
     }
 
-    // ---------------------------------------------------------
-    // 5. Exchange authorization code -> short-lived token
-    // ---------------------------------------------------------
-
+    // 6. Authorization code -> short-lived token
     console.log(`[${requestId}] Exchanging Instagram authorization code...`);
 
     const shortTokenBody = new URLSearchParams();
-
     shortTokenBody.set("client_id", clientId);
     shortTokenBody.set("client_secret", clientSecret);
     shortTokenBody.set("grant_type", "authorization_code");
     shortTokenBody.set("redirect_uri", redirectUri);
     shortTokenBody.set("code", code);
 
-    const shortTokenResponse = await fetch(
-      INSTAGRAM_TOKEN_URL,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: shortTokenBody.toString(),
-        cache: "no-store",
-      }
-    );
+    const shortTokenResponse = await fetch(INSTAGRAM_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: shortTokenBody.toString(),
+      cache: "no-store",
+    });
 
     const shortTokenText = await shortTokenResponse.text();
 
     console.log(
-      `[${requestId}] Instagram short token response status:`,
+      `[${requestId}] Short token response status:`,
       shortTokenResponse.status
     );
 
@@ -233,200 +178,118 @@ export async function GET(req: NextRequest) {
         `[${requestId}] Instagram short token exchange failed:`,
         shortTokenText
       );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "short_token_exchange",
-      });
+      return fail("short_token_exchange");
     }
 
     let shortTokenData: any;
-
     try {
       shortTokenData = JSON.parse(shortTokenText);
     } catch {
       console.error(
-        `[${requestId}] Invalid JSON from Instagram short token response:`,
+        `[${requestId}] Invalid JSON from short token response:`,
         shortTokenText
       );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "invalid_short_token_response",
-      });
+      return fail("invalid_short_token_response");
     }
 
     const shortAccessToken = shortTokenData?.access_token;
     const shortInstagramUserId = shortTokenData?.user_id;
 
     if (!shortAccessToken) {
-      console.error(
-        `[${requestId}] Instagram short token missing access_token:`,
-        shortTokenData
-      );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_short_token",
-      });
+      console.error(`[${requestId}] Short token missing access_token`);
+      return fail("missing_short_token");
     }
 
     console.log(
-      `[${requestId}] Instagram short token received for IG user:`,
+      `[${requestId}] Short token received for IG user:`,
       shortInstagramUserId
     );
 
-    // ---------------------------------------------------------
-    // 6. Exchange short-lived -> long-lived token
-    // ---------------------------------------------------------
-
-    console.log(`[${requestId}] Exchanging short token for long-lived token...`);
+    // 7. Short-lived -> long-lived token
+    console.log(`[${requestId}] Exchanging for long-lived token...`);
 
     const longTokenUrl = new URL(`${INSTAGRAM_GRAPH_URL}/access_token`);
-
     longTokenUrl.searchParams.set("grant_type", "ig_exchange_token");
     longTokenUrl.searchParams.set("client_secret", clientSecret);
     longTokenUrl.searchParams.set("access_token", shortAccessToken);
 
-    const longTokenResponse = await fetch(
-      longTokenUrl.toString(),
-      {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-        },
-        cache: "no-store",
-      }
-    );
+    const longTokenResponse = await fetch(longTokenUrl.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
 
     const longTokenText = await longTokenResponse.text();
 
     console.log(
-      `[${requestId}] Instagram long token response status:`,
+      `[${requestId}] Long token response status:`,
       longTokenResponse.status
     );
 
-    console.log(
-      `[${requestId}] Instagram long token raw response:`,
-      longTokenText
-    );
-
     if (!longTokenResponse.ok) {
-      console.error(
-        `[${requestId}] Instagram long-lived token exchange failed:`,
-        {
-          status: longTokenResponse.status,
-          response: longTokenText,
-        }
-      );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "long_token_exchange",
+      // Do not log the raw success body (it contains the token); errors are safe.
+      console.error(`[${requestId}] Long-lived token exchange failed:`, {
+        status: longTokenResponse.status,
+        response: longTokenText,
       });
+      return fail("long_token_exchange");
     }
 
     let longTokenData: any;
-
     try {
       longTokenData = JSON.parse(longTokenText);
     } catch {
-      console.error(
-        `[${requestId}] Invalid JSON from long token response:`,
-        longTokenText
-      );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "invalid_long_token_response",
-      });
+      console.error(`[${requestId}] Invalid JSON from long token response`);
+      return fail("invalid_long_token_response");
     }
 
     const longAccessToken = longTokenData?.access_token;
     const expiresIn = Number(longTokenData?.expires_in) || 0;
 
     if (!longAccessToken) {
-      console.error(
-        `[${requestId}] Long token response has no access_token:`,
-        longTokenData
-      );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_long_token",
-      });
+      console.error(`[${requestId}] Long token response has no access_token`);
+      return fail("missing_long_token");
     }
 
-    console.log(`[${requestId}] Instagram long-lived token received successfully`);
-    console.log(`[${requestId}] Long token expires in:`, expiresIn);
+    console.log(`[${requestId}] Long-lived token received; expires in:`, expiresIn);
 
-    // ---------------------------------------------------------
-    // 7. Calculate token expiry
-    // ---------------------------------------------------------
-
+    // 8. Token expiry
     const tokenExpiresAt =
-      expiresIn > 0
-        ? new Date(Date.now() + expiresIn * 1000)
-        : null;
+      expiresIn > 0 ? new Date(Date.now() + expiresIn * 1000) : null;
 
-    console.log(`[${requestId}] Instagram token expires at:`, tokenExpiresAt);
-
-    // ---------------------------------------------------------
-    // 8. Get Instagram profile
-    // ---------------------------------------------------------
-
+    // 9. Instagram profile
     console.log(`[${requestId}] Fetching Instagram profile...`);
 
     const profileUrl = new URL(`${INSTAGRAM_GRAPH_URL}/me`);
-
     profileUrl.searchParams.set(
       "fields",
       "user_id,username,name,profile_picture_url"
     );
-
     profileUrl.searchParams.set("access_token", longAccessToken);
 
-    const profileResponse = await fetch(
-      profileUrl.toString(),
-      {
-        method: "GET",
-        cache: "no-store",
-      }
-    );
+    const profileResponse = await fetch(profileUrl.toString(), {
+      method: "GET",
+      cache: "no-store",
+    });
 
     const profileText = await profileResponse.text();
 
     console.log(
-      `[${requestId}] Instagram profile response status:`,
+      `[${requestId}] Profile response status:`,
       profileResponse.status
     );
 
     if (!profileResponse.ok) {
-      console.error(
-        `[${requestId}] Instagram profile request failed:`,
-        profileText
-      );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "instagram_profile",
-      });
+      console.error(`[${requestId}] Profile request failed:`, profileText);
+      return fail("instagram_profile");
     }
 
     let profileData: any;
-
     try {
       profileData = JSON.parse(profileText);
     } catch {
-      console.error(
-        `[${requestId}] Invalid Instagram profile response:`,
-        profileText
-      );
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "invalid_profile_response",
-      });
+      console.error(`[${requestId}] Invalid profile response:`, profileText);
+      return fail("invalid_profile_response");
     }
 
     console.log(`[${requestId}] Instagram profile:`, {
@@ -435,99 +298,58 @@ export async function GET(req: NextRequest) {
       name: profileData?.name,
     });
 
-    // ---------------------------------------------------------
-    // 9. Determine Instagram user ID
-    // ---------------------------------------------------------
-
+    // 10. Instagram user ID
     const instagramUserId = String(
-      profileData?.user_id ||
-        profileData?.id ||
-        shortInstagramUserId ||
-        ""
+      profileData?.user_id || profileData?.id || shortInstagramUserId || ""
     );
 
     if (!instagramUserId) {
       console.error(`[${requestId}] Instagram user ID could not be determined`);
-
-      return redirectToFrontend("/posters", {
-        instagram: "error",
-        message: "missing_instagram_user_id",
-      });
+      return fail("missing_instagram_user_id");
     }
 
     const instagramUsername = profileData?.username || null;
     const instagramName = profileData?.name || null;
-    const instagramProfilePicture =
-      profileData?.profile_picture_url || null;
+    const instagramProfilePicture = profileData?.profile_picture_url || null;
 
-    // ---------------------------------------------------------
-    // 10. Check existing Instagram connection
-    // ---------------------------------------------------------
-
-    console.log(
-      `[${requestId}] Checking existing Instagram connection:`,
-      instagramUserId
-    );
-
+    // 11. Existing connection?
     const existingConnections = await db
       .select()
       .from(instagramConnections)
-      .where(
-        eq(
-          instagramConnections.instagramUserId,
-          instagramUserId
-        )
-      )
+      .where(eq(instagramConnections.instagramUserId, instagramUserId))
       .limit(1);
 
     const existingConnection = existingConnections[0];
 
-    // ---------------------------------------------------------
-    // 11. Existing connection
-    // ---------------------------------------------------------
-
     if (existingConnection) {
-      console.log(`[${requestId}] Existing Instagram connection found:`, {
+      console.log(`[${requestId}] Existing connection found:`, {
         connectionId: existingConnection.id,
         dbUserId: existingConnection.userId,
         currentUserId: userId,
-        instagramUserId,
       });
 
-      if (Number(existingConnection.userId) === userId) {
-        console.log(`[${requestId}] Updating existing Instagram connection...`);
-
-        await db
-          .update(instagramConnections)
-          .set({
-            instagramUsername,
-            instagramName,
-            instagramProfilePicture,
-            accessToken: longAccessToken,
-            tokenExpiresAt,
-            status: "active",
-            updatedAt: new Date(),
-          })
-          .where(eq(instagramConnections.id, existingConnection.id));
-
-        console.log(`[${requestId}] Instagram connection updated successfully`);
-      } else {
+      if (Number(existingConnection.userId) !== userId) {
         console.error(
           `[${requestId}] Instagram account already connected to another BizMyntra user`
         );
-
-        return redirectToFrontend("/posters", {
-          instagram: "error",
-          message: "instagram_already_connected",
-        });
+        return fail("instagram_already_connected");
       }
+
+      await db
+        .update(instagramConnections)
+        .set({
+          instagramUsername,
+          instagramName,
+          instagramProfilePicture,
+          accessToken: longAccessToken,
+          tokenExpiresAt,
+          status: "active",
+          updatedAt: new Date(),
+        })
+        .where(eq(instagramConnections.id, existingConnection.id));
+
+      console.log(`[${requestId}] Instagram connection updated`);
     } else {
-      // -------------------------------------------------------
-      // 12. New Instagram connection
-      // -------------------------------------------------------
-
-      console.log(`[${requestId}] Creating new Instagram connection...`);
-
       const inserted = await db
         .insert(instagramConnections)
         .values({
@@ -547,45 +369,15 @@ export async function GET(req: NextRequest) {
       console.log(`[${requestId}] Instagram connection created:`, inserted);
     }
 
-    // ---------------------------------------------------------
-    // 13. Mark user as Instagram connected
-    // ---------------------------------------------------------
-
-    console.log(`[${requestId}] Updating users.instagramConnected...`);
-
+    // 12. Mark user as connected
     await db
       .update(users)
-      .set({
-        instagramConnected: true,
-      })
+      .set({ instagramConnected: true })
       .where(eq(users.id, userId));
-
-    console.log(`[${requestId}] users.instagramConnected updated successfully`);
-
-    // ---------------------------------------------------------
-    // 14. Verify DB record
-    // ---------------------------------------------------------
-
-    const savedConnections = await db
-      .select()
-      .from(instagramConnections)
-      .where(eq(instagramConnections.userId, userId))
-      .limit(1);
-
-    console.log(`[${requestId}] Instagram DB verification:`, {
-      found: savedConnections.length > 0,
-      connectionId: savedConnections[0]?.id,
-      instagramUserId: savedConnections[0]?.instagramUserId,
-      username: savedConnections[0]?.instagramUsername,
-      status: savedConnections[0]?.status,
-    });
-
-    // ---------------------------------------------------------
-    // 15. Redirect frontend
-    // ---------------------------------------------------------
 
     console.log(`[${requestId}] Instagram connection completed successfully`);
 
+    // 13. Redirect frontend
     return redirectToFrontend("/posters", {
       instagram: "connected",
       ...(bannerId ? { bannerId: String(bannerId) } : {}),
@@ -596,9 +388,6 @@ export async function GET(req: NextRequest) {
     console.error(error);
     console.error("========================================");
 
-    return redirectToFrontend("/posters", {
-      instagram: "error",
-      message: error?.message || "instagram_callback_failed",
-    });
+    return fail(error?.message || "instagram_callback_failed");
   }
 }

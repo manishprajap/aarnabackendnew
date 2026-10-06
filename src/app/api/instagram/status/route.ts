@@ -1,161 +1,84 @@
 // src/app/api/instagram/status/route.ts
-
-import {
-  NextRequest,
-  NextResponse,
-} from 'next/server';
-
+import { NextRequest, NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 
 import { db } from '@/db';
-import { instagramConnections } from '@/db/schema';
+import { instagramConnections, instagramSelectedTargets } from '@/db/schema';
+import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 
-import {
-  getUserIdFromRequest,
-  AuthError,
-} from '@/lib/auth';
-
-export async function GET(
-  req: NextRequest
-) {
+export async function GET(req: NextRequest) {
   try {
-    const userId =
-      getUserIdFromRequest(req);
+    const userId = getUserIdFromRequest(req);
 
-    const connectionRows =
-      await db
-        .select({
-          id:
-            instagramConnections.id,
+    const connectionRows = await db
+      .select({
+        instagramUserId: instagramConnections.instagramUserId,
+        instagramUsername: instagramConnections.instagramUsername,
+        instagramName: instagramConnections.instagramName,
+        instagramProfilePicture: instagramConnections.instagramProfilePicture,
+        tokenExpiresAt: instagramConnections.tokenExpiresAt,
+        status: instagramConnections.status,
+      })
+      .from(instagramConnections)
+      .where(eq(instagramConnections.userId, userId));
+      // .limit(1) hata diya — ab saare connected accounts aayenge
 
-          instagramUserId:
-            instagramConnections.instagramUserId,
+    const activeRows = connectionRows.filter(
+      (r) =>
+        r.status === 'active' &&
+        (!r.tokenExpiresAt || new Date(r.tokenExpiresAt).getTime() > Date.now())
+    );
 
-          instagramUsername:
-            instagramConnections.instagramUsername,
+    if (activeRows.length === 0) {
+      const anyExpired = connectionRows.some(
+        (r) => r.status === 'expired' || (r.tokenExpiresAt && new Date(r.tokenExpiresAt).getTime() <= Date.now())
+      );
 
-          instagramName:
-            instagramConnections.instagramName,
-
-          instagramProfilePicture:
-            instagramConnections.instagramProfilePicture,
-
-          tokenExpiresAt:
-            instagramConnections.tokenExpiresAt,
-
-          status:
-            instagramConnections.status,
-        })
-        .from(
-          instagramConnections
-        )
-        .where(
-          eq(
-            instagramConnections.userId,
-            userId
-          )
-        )
-        .limit(1);
-
-    if (connectionRows.length === 0) {
       return NextResponse.json({
         success: true,
         connected: false,
+        expired: anyExpired,
+        targets: [],
+        selectedTargets: [],
         connection: null,
       });
     }
 
-    const instagram =
-      connectionRows[0];
+    const selectedRow = await db
+      .select()
+      .from(instagramSelectedTargets)
+      .where(eq(instagramSelectedTargets.userId, userId))
+      .limit(1);
 
-    /*
-     * Check database status.
-     */
-
-    if (
-      instagram.status !== 'active'
-    ) {
-      return NextResponse.json({
-        success: true,
-        connected: false,
-        expired:
-          instagram.status ===
-          'expired',
-        connection: null,
-      });
-    }
-
-    /*
-     * Check token expiry.
-     */
-
-    if (
-      instagram.tokenExpiresAt &&
-      new Date(
-        instagram.tokenExpiresAt
-      ).getTime() <= Date.now()
-    ) {
-      return NextResponse.json({
-        success: true,
-        connected: false,
-        expired: true,
-        connection: null,
-      });
-    }
+    const selected: string[] = selectedRow[0]
+      ? JSON.parse(selectedRow[0].targets)
+      : activeRows.map((r) => r.instagramUserId); // default: sab selected
 
     return NextResponse.json({
       success: true,
       connected: true,
       expired: false,
 
-      /*
-       * IMPORTANT:
-       * Key is "connection" (not "profile") so the frontend's
-       * generic username-resolution logic
-       * (response?.connection?.username) picks this up
-       * the same way it already does for Facebook
-       * (response?.connection?.pageName).
-       */
+      targets: activeRows.map((r) => ({
+        type: 'account',
+        urn: r.instagramUserId,
+        name: r.instagramUsername || r.instagramName || 'Instagram account',
+      })),
+      selectedTargets: selected,
+
+      // backward-compat
       connection: {
-        id:
-          instagram.instagramUserId,
-
-        username:
-          instagram.instagramUsername,
-
-        name:
-          instagram.instagramName,
-
-        profilePicture:
-          instagram.instagramProfilePicture,
+        id: activeRows[0].instagramUserId,
+        username: activeRows[0].instagramUsername,
+        name: activeRows[0].instagramName,
+        profilePicture: activeRows[0].instagramProfilePicture,
       },
     });
   } catch (error) {
-    if (
-      error instanceof AuthError
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            error.message,
-        },
-        { status: 401 }
-      );
+    if (error instanceof AuthError) {
+      return NextResponse.json({ success: false, message: error.message }, { status: 401 });
     }
-
-    console.error(
-      '[Instagram Status] Error:',
-      error
-    );
-
-    return NextResponse.json(
-      {
-        success: false,
-        message:
-          'Failed to check Instagram connection',
-      },
-      { status: 500 }
-    );
+    console.error('[Instagram Status] Error:', error);
+    return NextResponse.json({ success: false, message: 'Failed to check Instagram connection' }, { status: 500 });
   }
 }

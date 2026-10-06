@@ -5,13 +5,11 @@ import { db } from '@/db';
 import { plans, subscriptions, transactions } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { corsHeaders } from '@/lib/cors';
-import { razorpay } from '@/lib/razorpay';
+import { razorpay, razorpayKeyId } from '@/lib/razorpay';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 
 // Wraps NextResponse.json so every response — not just OPTIONS — carries
-// the CORS headers. Without this, the browser's preflight passes but it
-// still blocks reading the real POST response, which looks identical to a
-// CORS failure from the frontend's point of view.
+// the CORS headers.
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status, headers: corsHeaders() });
 }
@@ -22,7 +20,8 @@ export async function OPTIONS() {
 
 export async function POST(req: NextRequest) {
   try {
-    const userId = getUserIdFromRequest(req);
+    // await is harmless if the function is sync, and required if it is async.
+    const userId = Number(await getUserIdFromRequest(req));
 
     const body = await req.json();
     const planId = Number(body?.planId);
@@ -74,7 +73,7 @@ export async function POST(req: NextRequest) {
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      keyId: process.env.RAZORPAY_KEY_ID,
+      keyId: razorpayKeyId, // trimmed: never send the raw env value to the browser
       planId,
       subscriptionId,
     });

@@ -6,7 +6,7 @@ import { createSocialOAuthState } from '@/lib/socialOAuth';
 export async function POST(request: NextRequest) {
   try {
     const userId = getUserIdFromRequest(request);
-    const clientId = process.env.YOUTUBE_CLIENT_ID;
+    const clientId = process.env.GOOGLE_CLIENT_ID;
     const redirectUri = process.env.YOUTUBE_REDIRECT_URI;
 
     if (!clientId || !redirectUri) {

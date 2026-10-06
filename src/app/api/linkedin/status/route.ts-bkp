@@ -1,0 +1,164 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { and, eq } from 'drizzle-orm';
+
+import { db } from '@/db';
+import { socialAccounts } from '@/db/schema';
+import { getUserIdFromRequest, AuthError } from '@/lib/auth';
+
+function parseMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+
+  if (typeof raw === 'object') {
+    return raw as Record<string, unknown>;
+  }
+
+  try {
+    const parsed = JSON.parse(String(raw));
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    let userId: number;
+
+    try {
+      userId = getUserIdFromRequest(request);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        return NextResponse.json(
+          { success: false, message: error.message },
+          { status: 401 }
+        );
+      }
+      throw error;
+    }
+
+    const [connection] = await db
+      .select()
+      .from(socialAccounts)
+      .where(
+        and(
+          eq(socialAccounts.userId, userId),
+          eq(socialAccounts.provider, 'linkedin')
+        )
+      )
+      .limit(1);
+
+    if (!connection) {
+      return NextResponse.json({
+        success: true,
+        connected: false,
+        personal: null,
+        organizations: [],
+        targets: [],
+      });
+    }
+
+    const metadata = parseMetadata(connection.metadata);
+    const personal =
+      metadata.personal && typeof metadata.personal === 'object'
+        ? (metadata.personal as Record<string, unknown>)
+        : {};
+
+    const providerAccountId = String(
+      connection.providerAccountId || ''
+    ).trim();
+
+    const personalUrn = String(
+      metadata.ownerUrn ||
+        personal.urn ||
+        (providerAccountId
+          ? `urn:li:person:${providerAccountId}`
+          : '')
+    ).trim();
+
+    const personalName = String(
+      personal.name || connection.accountName || 'LinkedIn Profile'
+    ).trim();
+
+    const rawOrganizations = Array.isArray(metadata.organizations)
+      ? metadata.organizations
+      : [];
+
+    const organizations = rawOrganizations
+      .map((item: unknown) => {
+        const organization =
+          item && typeof item === 'object'
+            ? (item as Record<string, unknown>)
+            : {};
+
+        return {
+          id: String(organization.id || '').trim(),
+          urn: String(organization.urn || '').trim(),
+          name: String(
+            organization.name || 'LinkedIn Company Page'
+          ).trim(),
+          vanityName: organization.vanityName
+            ? String(organization.vanityName).trim()
+            : null,
+          role: organization.role
+            ? String(organization.role).trim()
+            : null,
+        };
+      })
+      .filter((organization) =>
+        /^urn:li:organization:[A-Za-z0-9_-]+$/.test(organization.urn)
+      );
+
+    const targets = [
+      ...(personalUrn
+        ? [
+            {
+              type: 'personal' as const,
+              urn: personalUrn,
+              name: personalName,
+              connected: true,
+            },
+          ]
+        : []),
+      ...organizations.map((organization) => ({
+        type: 'organization' as const,
+        urn: organization.urn,
+        name: organization.name,
+        id: organization.id,
+        vanityName: organization.vanityName,
+        role: organization.role,
+        connected: true,
+      })),
+    ];
+
+    const tokenExpired =
+      connection.expiresAt &&
+      new Date(connection.expiresAt).getTime() <= Date.now();
+
+    return NextResponse.json({
+      success: true,
+      connected: true,
+      tokenExpired: Boolean(tokenExpired),
+      personal: personalUrn
+        ? {
+            urn: personalUrn,
+            id: providerAccountId,
+            name: personalName,
+          }
+        : null,
+      organizations,
+      targets,
+    });
+  } catch (error) {
+    console.error('[LinkedIn Status] Error:', error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: 'Failed to load LinkedIn connection',
+      },
+      { status: 500 }
+    );
+  }
+}

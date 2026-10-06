@@ -1,3 +1,4 @@
+///src/app/api/auth/verify-otp/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { eq, and, desc, gt } from 'drizzle-orm';
@@ -103,7 +104,7 @@ export async function POST(req: NextRequest) {
       .limit(1);
 
     const token = signToken({ userId: user.id });
-    const hasBusiness = Boolean(user.category && user.city);
+    const hasBusiness = Boolean(user.business_category && user.city);
     const hasSubscription = Boolean(activeSub);
 
     const response = NextResponse.json({

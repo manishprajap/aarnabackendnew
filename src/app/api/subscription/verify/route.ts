@@ -7,6 +7,7 @@ import { plans, subscriptions, transactions, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { corsHeaders } from '@/lib/cors';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
+import { razorpayKeySecret } from '@/lib/razorpay';
 
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status, headers: corsHeaders() });
@@ -16,14 +17,21 @@ export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders() });
 }
 
+// Constant-time comparison; false if lengths differ.
+function safeEqual(a: string, b: string) {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const userId = getUserIdFromRequest(req);
+    const userId = Number(await getUserIdFromRequest(req));
     const body = await req.json();
 
-    const razorpayOrderId = String(body?.razorpay_order_id || '');
-    const razorpayPaymentId = String(body?.razorpay_payment_id || '');
-    const razorpaySignature = String(body?.razorpay_signature || '');
+    const razorpayOrderId = String(body?.razorpay_order_id || '').trim();
+    const razorpayPaymentId = String(body?.razorpay_payment_id || '').trim();
+    const razorpaySignature = String(body?.razorpay_signature || '').trim();
 
     if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
       return json(
@@ -32,18 +40,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!process.env.RAZORPAY_KEY_SECRET) {
-      throw new Error('RAZORPAY_KEY_SECRET is missing from environment variables');
-    }
-
-    // Verify the payment actually belongs to this order and hasn't been
-    // tampered with, per Razorpay's documented signature scheme.
+    // Uses the cleaned secret (no hidden "\r" from CRLF .env files).
     const expectedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .createHmac('sha256', razorpayKeySecret)
       .update(`${razorpayOrderId}|${razorpayPaymentId}`)
       .digest('hex');
 
-    const isValid = expectedSignature === razorpaySignature;
+    const isValid = safeEqual(expectedSignature, razorpaySignature);
 
     const [existingTransaction] = await db
       .select()
@@ -55,9 +58,8 @@ export async function POST(req: NextRequest) {
       return json({ error: 'No matching transaction found' }, 404);
     }
 
-    // Defense in depth: make sure the order being verified actually belongs
-    // to the authenticated user making this request.
-    if (existingTransaction.userId !== userId) {
+    // Make sure the order being verified belongs to the authenticated user.
+    if (Number(existingTransaction.userId) !== userId) {
       return json({ error: 'Order does not belong to this user' }, 403);
     }
 
@@ -91,7 +93,6 @@ export async function POST(req: NextRequest) {
     const endDate = new Date(startDate);
     endDate.setDate(endDate.getDate() + plan.durationDays);
 
-    // Mark the payment as successful.
     await db
       .update(transactions)
       .set({
@@ -101,7 +102,6 @@ export async function POST(req: NextRequest) {
       })
       .where(eq(transactions.id, existingTransaction.id));
 
-    // Activate the subscription period.
     if (existingTransaction.subscriptionId) {
       await db
         .update(subscriptions)
@@ -113,7 +113,6 @@ export async function POST(req: NextRequest) {
         .where(eq(subscriptions.id, existingTransaction.subscriptionId));
     }
 
-    // Reflect the active plan and credit balance on the user record.
     await db
       .update(users)
       .set({

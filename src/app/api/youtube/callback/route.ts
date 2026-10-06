@@ -31,8 +31,8 @@ export async function GET(request: NextRequest) {
   const stateData = verifySocialOAuthState(state, 'youtube');
   if (!stateData) return redirectToFrontend('error', 'invalid_or_expired_state');
 
-  const clientId = process.env.YOUTUBE_CLIENT_ID;
-  const clientSecret = process.env.YOUTUBE_CLIENT_SECRET;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   const redirectUri = process.env.YOUTUBE_REDIRECT_URI;
 
   if (!clientId || !clientSecret || !redirectUri) {

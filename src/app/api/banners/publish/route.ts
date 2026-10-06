@@ -1,6 +1,4 @@
-// src/app/api/banners/publish/route.ts
-// src/app/api/banners/publish/route.ts
-
+//src/app/api/banners/publish/route
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs/promises';
@@ -14,6 +12,8 @@ import {
   whatsappConnections,
   whatsappContacts,
   products,
+  socialAccounts,
+  bannerPublications,
 } from '@/db/schema';
 
 import { eq, and } from 'drizzle-orm';
@@ -23,22 +23,25 @@ import {
   AuthError,
 } from '@/lib/auth';
 
-// NOTE: confirm this decrypt function actually exists in your
-// facebook-token lib (symmetric counterpart to encryptFacebookToken).
-// If your whatsapp access_token is stored encrypted with a different
-// helper, swap decryptWhatsappToken below accordingly.
 import {
   decryptFacebookToken,
 } from '@/lib/facebook-token';
+
+import {
+  LINKEDIN_REST_BASE,
+  linkedinHeaders,
+} from '@/lib/linkedin-targets';
 
 /* =========================================================
    CONFIG
 ========================================================= */
 
 const META_GRAPH_VERSION =
-  process.env.META_GRAPH_VERSION || 'v26.0';
+  process.env.META_GRAPH_VERSION || 'v25.0';
 
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
+const PUBLIC_BASE_URL = (
+  process.env.PUBLIC_BASE_URL || 'https://aarnexai.com'
+).replace(/\/+$/, '');
 
 const IG_GRAPH_API_BASE =
   `https://graph.instagram.com/${META_GRAPH_VERSION}`;
@@ -49,9 +52,16 @@ const FB_GRAPH_API_BASE =
 const WA_GRAPH_API_BASE =
   `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 
+const GOOGLE_BUSINESS_API_BASE = 'https://mybusiness.googleapis.com/v4';
+
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT ||
   '/var/www/aarnexai.com/aarnexai-backend/upload';
+
+const WA_BROADCAST_TEMPLATE = process.env.WA_BROADCAST_TEMPLATE || '';
+const WA_TEMPLATE_LANG = process.env.WA_TEMPLATE_LANG || 'en';
+
+const WA_ERR_REENGAGEMENT = 131047;
 
 
 /* =========================================================
@@ -61,6 +71,10 @@ const UPLOAD_ROOT =
 interface PublishBody {
   bannerId: number | string;
   platforms: string[];
+  linkedinAuthorUrn?: string;
+  linkedinOwnerUrns?: string[];
+  facebookPageIds?: string[];
+  instagramAccountIds?: string[];
 }
 
 interface InstagramContainerResponse {
@@ -86,6 +100,10 @@ interface InstagramStatusResponse {
 }
 
 
+/* =========================================================
+   HELPERS
+========================================================= */
+
 function getPublicImageUrl(
   imageUrl: string | null | undefined
 ): string {
@@ -106,7 +124,7 @@ function getPublicImageUrl(
     url = `/${url}`;
   }
 
-  return `${PUBLIC_BASE_URL}${url}`;
+  return `${PUBLIC_BASE_URL}/${url.replace(/^\/+/, '')}`;
 }
 
 
@@ -131,6 +149,59 @@ function getMetaErrorMessage(
 }
 
 
+// social_accounts.metadata is a free-form JSON string holding whatever
+// extra fields a given provider needs beyond providerAccountId/accountName
+// (see schema-additions.ts). Parse it defensively — a row that predates
+// the metadata column, or was never backfilled, just yields {}.
+function parseAccountMetadata(raw: unknown): Record<string, any> {
+  if (!raw) return {};
+
+  // social_accounts.metadata is a MySQL JSON column, so Drizzle normally
+  // hands back an already-parsed object. Older rows / some drivers may
+  // still return a JSON string, so handle both.
+  if (typeof raw === 'object') {
+    return raw as Record<string, any>;
+  }
+
+  try {
+    const parsed = JSON.parse(String(raw));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+
+// Records that a banner was published somewhere, so the analytics
+// endpoint (src/app/api/banners/analytics/route.ts) can look up the
+// external post ID later and pull impressions/clicks/reach for it.
+// Best-effort — never let a logging failure fail the publish itself.
+async function recordBannerPublication(params: {
+  bannerId: number | string;
+  userId: number;
+  platform: string;
+  externalId: string;
+  permalink?: string | null;
+}) {
+  const { bannerId, userId, platform, externalId, permalink } = params;
+
+  try {
+    await db.insert(bannerPublications).values({
+      bannerId: Number(bannerId),
+      userId,
+      platform,
+      externalId,
+      permalink: permalink || null,
+      publishedAt: new Date(),
+    });
+  } catch (error) {
+    console.error('[Publish] Failed to record bannerPublications row:', {
+      bannerId, platform, error,
+    });
+  }
+}
+
+
 async function verifyPublicImage(imageUrl: string) {
   console.log('[Publish] Checking public image URL:', imageUrl);
 
@@ -151,6 +222,10 @@ async function verifyPublicImage(imageUrl: string) {
   return { response, contentType };
 }
 
+
+/* =========================================================
+   INSTAGRAM PUBLISHING
+========================================================= */
 
 async function createInstagramJpeg(
   originalImageUrl: string,
@@ -358,6 +433,89 @@ async function publishToFacebook(params: {
    WHATSAPP PUBLISHING (broadcast image to contact list)
 ========================================================= */
 
+class WhatsappSendError extends Error {
+  code?: number;
+  subcode?: number;
+
+  constructor(message: string, code?: number, subcode?: number) {
+    super(message);
+    this.name = 'WhatsappSendError';
+    this.code = code;
+    this.subcode = subcode;
+  }
+}
+
+
+// WhatsApp wants digits only, with country code, no "+" or spaces.
+function normalizeWhatsappNumber(value: string): string {
+  return String(value || '').replace(/\D/g, '');
+}
+
+
+/**
+ * Verifies that the stored Phone Number ID and access token belong together.
+ * This is intentionally called before broadcasting so a stale/mismatched
+ * WhatsApp connection produces a useful error instead of misleading
+ * recipient errors such as (#133010).
+ */
+async function verifyWhatsappSender(params: {
+  phoneNumberId: string;
+  accessToken: string;
+}) {
+  const { phoneNumberId, accessToken } = params;
+
+  const url =
+    `${WA_GRAPH_API_BASE}/${encodeURIComponent(phoneNumberId)}` +
+    `?fields=id,display_phone_number,verified_name`;
+
+  console.log('[WhatsApp] Verifying sender connection:', {
+    apiVersion: META_GRAPH_VERSION,
+    phoneNumberId,
+  });
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    cache: 'no-store',
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  console.log('[WhatsApp] Sender verification response:', {
+    ok: response.ok,
+    status: response.status,
+    id: data?.id,
+    display_phone_number: data?.display_phone_number,
+    verified_name: data?.verified_name,
+    error: data?.error,
+  });
+
+  if (!response.ok || !data?.id) {
+    throw new WhatsappSendError(
+      getMetaErrorMessage(
+        data,
+        'WhatsApp sender verification failed. Check the stored Phone Number ID and access token.'
+      ),
+      data?.error?.code,
+      data?.error?.error_subcode
+    );
+  }
+
+  if (String(data.id) !== phoneNumberId) {
+    throw new WhatsappSendError(
+      `WhatsApp Phone Number ID mismatch. Stored ${phoneNumberId}, Meta returned ${data.id}.`,
+      data?.error?.code,
+      data?.error?.error_subcode
+    );
+  }
+
+  return data;
+}
+
+
+// Free-form image. Only works inside the 24-hour customer-service window.
 async function sendWhatsappImage(params: {
   phoneNumberId: string;
   accessToken: string;
@@ -366,7 +524,68 @@ async function sendWhatsappImage(params: {
   caption: string;
 }) {
 
-  const { phoneNumberId, accessToken, to, imageUrl, caption } = params;
+  const { phoneNumberId, accessToken, imageUrl, caption } = params;
+  const to = normalizeWhatsappNumber(params.to);
+
+  const url = `${WA_GRAPH_API_BASE}/${phoneNumberId}/messages`;
+
+  console.log('[WhatsApp] Sending image:', {
+    apiVersion: META_GRAPH_VERSION,
+    phoneNumberId,
+    to,
+    imageUrl,
+  });
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'image',
+      image: {
+        link: imageUrl,
+        caption: caption || '',
+      },
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new WhatsappSendError(
+      getMetaErrorMessage(data, `WhatsApp send failed for ${to}`),
+      data?.error?.code,
+      data?.error?.error_subcode
+    );
+  }
+
+  return data;
+}
+
+
+// Approved template with an image header. Works outside the 24h window.
+async function sendWhatsappTemplateImage(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  imageUrl: string;
+  caption: string;
+}) {
+
+  const { phoneNumberId, accessToken, imageUrl, caption } = params;
+  const to = normalizeWhatsappNumber(params.to);
+
+  // Template body variables can't contain newlines/tabs or 4+ spaces in a row.
+  const bodyText = (caption || 'Check out this product!')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/ {4,}/g, '   ')
+    .trim()
+    .slice(0, 1000);
 
   const url = `${WA_GRAPH_API_BASE}/${phoneNumberId}/messages`;
 
@@ -378,19 +597,34 @@ async function sendWhatsappImage(params: {
     },
     body: JSON.stringify({
       messaging_product: 'whatsapp',
+      recipient_type: 'individual',
       to,
-      type: 'image',
-      image: {
-        link: imageUrl,
-        caption: caption || '',
+      type: 'template',
+      template: {
+        name: WA_BROADCAST_TEMPLATE,
+        language: { code: WA_TEMPLATE_LANG },
+        components: [
+          {
+            type: 'header',
+            parameters: [{ type: 'image', image: { link: imageUrl } }],
+          },
+          {
+            type: 'body',
+            parameters: [{ type: 'text', text: bodyText }],
+          },
+        ],
       },
     }),
   });
 
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(getMetaErrorMessage(data, `WhatsApp send failed for ${to}`));
+    throw new WhatsappSendError(
+      getMetaErrorMessage(data, `WhatsApp template send failed for ${to}`),
+      data?.error?.code,
+      data?.error?.error_subcode
+    );
   }
 
   return data;
@@ -400,13 +634,13 @@ async function sendWhatsappImage(params: {
 /**
  * Broadcasts the banner image to every active contact saved by this user.
  *
- * IMPORTANT: WhatsApp Cloud API only allows free-form messages (like an
- * image) within a 24-hour customer service window after the contact last
- * messaged the business. Outside that window, Meta requires an approved
- * message TEMPLATE instead. This function will report per-contact failures
- * (e.g. "re-engagement message" errors) rather than silently succeeding —
- * you may eventually need a template-based fallback for contacts outside
- * the window.
+ * Strategy per contact:
+ *   1. Try a free-form image message (works inside the 24h window).
+ *   2. If Meta answers with 131047 (outside the window) and a template is
+ *      configured via WA_BROADCAST_TEMPLATE, retry with the template.
+ *   3. Otherwise report the failure for that contact.
+ *
+ * Contacts must have opted in to receive marketing messages.
  */
 async function publishToWhatsappContacts(params: {
   phoneNumberId: string;
@@ -419,6 +653,7 @@ async function publishToWhatsappContacts(params: {
   const { phoneNumberId, accessToken, imageUrl, caption, contacts } = params;
 
   const sent: string[] = [];
+  const sentViaTemplate: string[] = [];
   const failed: { phoneNumber: string; error: string }[] = [];
 
   for (const contact of contacts) {
@@ -434,18 +669,245 @@ async function publishToWhatsappContacts(params: {
       sent.push(contact.phoneNumber);
 
     } catch (error: any) {
+
+      const outsideWindow =
+        error instanceof WhatsappSendError &&
+        error.code === WA_ERR_REENGAGEMENT;
+
+      if (outsideWindow && WA_BROADCAST_TEMPLATE) {
+        try {
+          await sendWhatsappTemplateImage({
+            phoneNumberId,
+            accessToken,
+            to: contact.phoneNumber,
+            imageUrl,
+            caption,
+          });
+
+          sent.push(contact.phoneNumber);
+          sentViaTemplate.push(contact.phoneNumber);
+          continue;
+
+        } catch (templateError: any) {
+          console.error(
+            '[WhatsApp] Template send failed for', contact.phoneNumber, templateError
+          );
+
+          failed.push({
+            phoneNumber: contact.phoneNumber,
+            error:
+              templateError?.message || 'Unknown WhatsApp template send error',
+          });
+          continue;
+        }
+      }
+
       console.error(
         '[WhatsApp] Failed to send to', contact.phoneNumber, error
       );
 
       failed.push({
         phoneNumber: contact.phoneNumber,
-        error: error?.message || 'Unknown WhatsApp send error',
+        error: outsideWindow
+          ? 'Outside the 24-hour messaging window. Set WA_BROADCAST_TEMPLATE to an approved template to reach this contact.'
+          : error?.message || 'Unknown WhatsApp send error',
       });
     }
   }
 
-  return { sent, failed };
+  return { sent, sentViaTemplate, failed };
+}
+
+
+/* =========================================================
+   GOOGLE BUSINESS PUBLISHING (Business Profile "local post")
+========================================================= */
+
+async function publishToGoogleBusiness(params: {
+  accountId: string;
+  locationId: string;
+  accessToken: string;
+  imageUrl: string;
+  caption: string;
+}) {
+
+  const { accountId, locationId, accessToken, imageUrl, caption } = params;
+
+  console.log('[GoogleBusiness] Creating local post', { accountId, locationId });
+
+  const url =
+    `${GOOGLE_BUSINESS_API_BASE}/accounts/${accountId}/locations/${locationId}/localPosts`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      languageCode: 'en-US',
+      summary: caption,
+      topicType: 'STANDARD',
+      media: [
+        {
+          mediaFormat: 'PHOTO',
+          sourceUrl: imageUrl,
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+
+  console.log('[GoogleBusiness] Publish response:', data);
+
+  if (!response.ok || !data.name) {
+    throw new Error(getMetaErrorMessage(data, 'Google Business post failed'));
+  }
+
+  // data.name looks like: accounts/{accountId}/locations/{locationId}/localPosts/{postId}
+  return {
+    postName: data.name as string,
+    searchUrl: (data.searchUrl as string) || null,
+  };
+}
+
+
+/* =========================================================
+   LINKEDIN PUBLISHING (Images API + Posts API)
+   1. initializeUpload  -> uploadUrl + image URN
+   2. PUT binary to uploadUrl
+   3. POST /rest/posts referencing the image URN
+========================================================= */
+
+// LinkedIn "little text" treats these characters as markup; unescaped, they
+// can silently truncate the post. '#' is left alone so hashtags still work.
+function escapeLinkedInText(text: string): string {
+  return text.replace(/[\\|{}@[\]()<>*_~]/g, (c) => `\\${c}`);
+}
+
+
+class LinkedInAuthError extends Error {}
+
+
+async function publishToLinkedIn(params: {
+  ownerUrn: string; // 'urn:li:person:abc' or 'urn:li:organization:12345'
+  accessToken: string;
+  imageUrl: string;
+  caption: string;
+}) {
+
+  const { ownerUrn, accessToken, imageUrl, caption } = params;
+
+  /* 1. Initialize image upload */
+
+  console.log('[LinkedIn] Initializing image upload', { ownerUrn });
+
+  const initRes = await fetch(
+    `${LINKEDIN_REST_BASE}/images?action=initializeUpload`,
+    {
+      method: 'POST',
+      headers: linkedinHeaders(accessToken),
+      body: JSON.stringify({
+        initializeUploadRequest: { owner: ownerUrn },
+      }),
+    }
+  );
+
+  const initData = await initRes.json().catch(() => ({}));
+
+  console.log('[LinkedIn] Initialize upload response:', initData);
+
+  if (initRes.status === 401) {
+    throw new LinkedInAuthError('LinkedIn access token is invalid or expired');
+  }
+
+  if (!initRes.ok || !initData?.value?.uploadUrl || !initData?.value?.image) {
+    throw new Error(
+      getMetaErrorMessage(initData, 'LinkedIn image upload initialization failed')
+    );
+  }
+
+  const uploadUrl = initData.value.uploadUrl as string;
+  const imageUrn = initData.value.image as string;
+
+
+  /* 2. Download banner and upload the binary */
+
+  console.log('[LinkedIn] Downloading source image:', imageUrl);
+
+  const imgRes = await fetch(imageUrl, { method: 'GET', cache: 'no-store' });
+
+  if (!imgRes.ok) {
+    throw new Error(
+      `Could not download banner image for LinkedIn. HTTP ${imgRes.status}`
+    );
+  }
+
+  const imageBuffer = Buffer.from(await imgRes.arrayBuffer());
+
+  console.log('[LinkedIn] Uploading image binary:', imageUrn);
+
+  const uploadRes = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: imageBuffer,
+  });
+
+  if (!uploadRes.ok) {
+    throw new Error(`LinkedIn image upload failed. HTTP ${uploadRes.status}`);
+  }
+
+
+  /* 3. Create the post (commentary max is 3000 chars) */
+
+  console.log('[LinkedIn] Creating post with image:', imageUrn);
+
+  const postRes = await fetch(`${LINKEDIN_REST_BASE}/posts`, {
+    method: 'POST',
+    headers: linkedinHeaders(accessToken),
+    body: JSON.stringify({
+      author: ownerUrn,
+      commentary: escapeLinkedInText((caption || '').slice(0, 3000)),
+      visibility: 'PUBLIC',
+      distribution: {
+        feedDistribution: 'MAIN_FEED',
+        targetEntities: [],
+        thirdPartyDistributionChannels: [],
+      },
+      content: {
+        media: { id: imageUrn, altText: 'Product banner' },
+      },
+      lifecycleState: 'PUBLISHED',
+      isReshareDisabledByAuthor: false,
+    }),
+  });
+
+  // Success is 201 with an empty body; the post URN is in x-restli-id.
+  const postData = postRes.ok ? {} : await postRes.json().catch(() => ({}));
+
+  if (postRes.status === 401) {
+    throw new LinkedInAuthError('LinkedIn access token is invalid or expired');
+  }
+
+  if (!postRes.ok) {
+    console.error('[LinkedIn] Post failed:', postData);
+    throw new Error(getMetaErrorMessage(postData, 'LinkedIn post failed'));
+  }
+
+  const postId = postRes.headers.get('x-restli-id');
+
+  if (!postId) {
+    throw new Error('LinkedIn did not return a post ID');
+  }
+
+  console.log('[LinkedIn] Post created:', postId);
+
+  return {
+    postId,
+    imageUrn,
+    permalink: `https://www.linkedin.com/feed/update/${postId}/`,
+  };
 }
 
 
@@ -479,7 +941,62 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as PublishBody;
     const bannerId = body?.bannerId;
 
+    const linkedinAuthorUrn =
+      typeof body?.linkedinAuthorUrn === 'string'
+        ? body.linkedinAuthorUrn.trim()
+        : '';
+
     const platforms = Array.isArray(body?.platforms) ? body.platforms : [];
+
+    const requestedLinkedInOwnerUrns: string[] = Array.isArray(
+      body?.linkedinOwnerUrns
+    )
+      ? Array.from(
+          new Set(
+            body.linkedinOwnerUrns
+              .map((u: string) => String(u).trim())
+              .filter((u: string) =>
+                /^urn:li:(person|organization):[A-Za-z0-9_-]+$/.test(u)
+              )
+          )
+        )
+      : [];
+
+    // Backwards compatibility: accept the old single LinkedIn author field.
+    const linkedinOwnerUrns: string[] = requestedLinkedInOwnerUrns.length > 0
+      ? requestedLinkedInOwnerUrns
+      : linkedinAuthorUrn &&
+          /^urn:li:(person|organization):[A-Za-z0-9_-]+$/.test(linkedinAuthorUrn)
+        ? [linkedinAuthorUrn]
+        : [];
+
+    // Explicit Facebook Page IDs picked by the user in the target
+    // sub-picker. Empty array means "not specified" -> fall back to every
+    // active connected Page for this user.
+    const requestedFacebookPageIds: string[] = Array.isArray(
+      body?.facebookPageIds
+    )
+      ? Array.from(
+          new Set(
+            body.facebookPageIds
+              .map((id: string) => String(id).trim())
+              .filter((id: string) => id.length > 0)
+          )
+        )
+      : [];
+
+    // Explicit Instagram business-account IDs, same idea.
+    const requestedInstagramAccountIds: string[] = Array.isArray(
+      body?.instagramAccountIds
+    )
+      ? Array.from(
+          new Set(
+            body.instagramAccountIds
+              .map((id: string) => String(id).trim())
+              .filter((id: string) => id.length > 0)
+          )
+        )
+      : [];
 
     if (!bannerId) {
       return NextResponse.json(
@@ -505,8 +1022,18 @@ export async function POST(req: NextRequest) {
     const wantsInstagram = normalizedPlatforms.includes('instagram');
     const wantsFacebook = normalizedPlatforms.includes('facebook');
     const wantsWhatsapp = normalizedPlatforms.includes('whatsapp');
+    const wantsGoogleBusiness = normalizedPlatforms.includes('google_business');
+    const wantsLinkedin = normalizedPlatforms.includes('linkedin');
+    const wantsYoutube = normalizedPlatforms.includes('youtube');
 
-    console.log('[Publish] Request:', { userId, bannerId, platforms: normalizedPlatforms });
+    console.log('[Publish] Request:', {
+      userId,
+      bannerId,
+      platforms: normalizedPlatforms,
+      requestedFacebookPageIds,
+      requestedInstagramAccountIds,
+      linkedinOwnerUrns,
+    });
 
 
     /* LOAD BANNER */
@@ -553,7 +1080,8 @@ export async function POST(req: NextRequest) {
 
 
     /* VERIFY ORIGINAL IMAGE — required by every platform, since
-       Facebook/Instagram/WhatsApp all fetch this URL server-side. */
+       Facebook/Instagram/WhatsApp/Google Business/LinkedIn all fetch
+       this URL server-side. */
 
     const imageCheck = await verifyPublicImage(originalImageUrl);
 
@@ -672,23 +1200,32 @@ export async function POST(req: NextRequest) {
     const results: Record<string, any> = {};
 
 
-    /* INSTAGRAM */
+    /* =====================================================
+       INSTAGRAM — one row PER connected business account. Posts
+       to every requested instagramAccountId (or every active
+       account if none were specified), same aggregate
+       posted/failed shape as LinkedIn.
+    ===================================================== */
 
     if (wantsInstagram) {
 
-      console.log('[Instagram] Looking for connection:', { userId });
+      console.log('[Instagram] Looking for connections:', {
+        userId,
+        requestedInstagramAccountIds,
+      });
 
       const connectionRows = await db
         .select()
         .from(instagramConnections)
-        .where(eq(instagramConnections.userId, userId))
-        .limit(1);
+        .where(eq(instagramConnections.userId, userId));
 
-      const connection = connectionRows[0];
+      const activeConnections = connectionRows.filter(
+        (row) => row.status === 'active'
+      );
 
-      console.log('[Instagram] Connection found:', !!connection);
+      console.log('[Instagram] Active connections found:', activeConnections.length);
 
-      if (!connection) {
+      if (activeConnections.length === 0) {
         results.instagram = {
           success: false,
           message: 'Instagram is not connected. Please connect Instagram first.',
@@ -696,145 +1233,466 @@ export async function POST(req: NextRequest) {
         };
       } else {
 
-        const instagramUserId = String(connection.instagramUserId || '').trim();
-        const accessToken = String(connection.accessToken || '').trim();
+        // No explicit selection -> use every active connected account.
+        const targetConnections =
+          requestedInstagramAccountIds.length > 0
+            ? activeConnections.filter((row) =>
+                requestedInstagramAccountIds.includes(
+                  String(row.instagramUserId)
+                )
+              )
+            : activeConnections;
 
-        if (!instagramUserId || !accessToken) {
+        if (targetConnections.length === 0) {
           results.instagram = {
             success: false,
-            message: 'Instagram connection is missing required fields',
+            message:
+              'None of the selected Instagram accounts are connected to this user.',
+            requestedTargets: requestedInstagramAccountIds,
+            availableTargets: activeConnections.map((row) =>
+              String(row.instagramUserId)
+            ),
           };
         } else {
 
-          try {
-            const instagramResult = await publishToInstagram({
-              instagramUserId,
-              accessToken,
-              imageUrl: instagramImageUrl,
-              caption,
-            });
+          const posted: {
+            instagramUserId: string;
+            mediaId: string;
+            containerId: string;
+          }[] = [];
+          const failedTargets: { instagramUserId: string; message: string }[] = [];
 
-            results.instagram = {
-              success: true,
-              mediaId: instagramResult.mediaId,
-              containerId: instagramResult.containerId,
-              imageUrl: instagramImageUrl,
-            };
+          for (const connection of targetConnections) {
 
-          } catch (error: any) {
-            console.error('[Instagram] Publishing failed:', error);
+            const instagramUserId = String(connection.instagramUserId || '').trim();
+            const accessToken = String(connection.accessToken || '').trim();
 
-            results.instagram = {
-              success: false,
-              message: error?.message || 'Instagram publishing failed',
-              imageUrl: instagramImageUrl,
-            };
+            if (!instagramUserId || !accessToken) {
+              failedTargets.push({
+                instagramUserId,
+                message: 'Instagram connection is missing required fields',
+              });
+              continue;
+            }
+
+            try {
+              const instagramResult = await publishToInstagram({
+                instagramUserId,
+                accessToken,
+                imageUrl: instagramImageUrl,
+                caption,
+              });
+
+              posted.push({
+                instagramUserId,
+                mediaId: instagramResult.mediaId,
+                containerId: instagramResult.containerId,
+              });
+
+              await recordBannerPublication({
+                bannerId,
+                userId,
+                platform: 'instagram',
+                externalId: instagramResult.mediaId,
+              });
+
+            } catch (error: any) {
+              console.error(
+                '[Instagram] Publishing failed for', instagramUserId, error
+              );
+
+              failedTargets.push({
+                instagramUserId,
+                message: error?.message || 'Instagram publishing failed',
+              });
+            }
           }
+
+          results.instagram = {
+            success: posted.length > 0,
+            requestedTargets:
+              requestedInstagramAccountIds.length > 0
+                ? requestedInstagramAccountIds
+                : activeConnections.map((row) => String(row.instagramUserId)),
+            availableTargets: activeConnections.map((row) =>
+              String(row.instagramUserId)
+            ),
+            posted,
+            failed: failedTargets,
+            mediaId: posted[0]?.mediaId,
+            containerId: posted[0]?.containerId,
+            message:
+              posted.length > 0
+                ? failedTargets.length > 0
+                  ? `Posted to ${posted.length} Instagram account(s); ${failedTargets.length} failed: ${failedTargets.map((f) => f.message).join('; ')}`
+                  : undefined
+                : failedTargets.map((f) => f.message).join('; ') ||
+                  'Instagram publishing failed',
+            imageUrl: instagramImageUrl,
+          };
         }
       }
     }
 
 
-    /* FACEBOOK */
+    /* =====================================================
+       FACEBOOK — one row PER connected Page. Posts to every
+       requested facebookPageId (or every active Page if none
+       were specified), same aggregate posted/failed shape as
+       LinkedIn/Instagram.
+    ===================================================== */
 
     if (wantsFacebook) {
 
-      console.log('[Facebook] Looking for connection:', { userId });
+      console.log('[Facebook] Looking for connections:', {
+        userId,
+        requestedFacebookPageIds,
+      });
 
       const connectionRows = await db
         .select()
         .from(facebookConnections)
-        .where(eq(facebookConnections.userId, userId))
-        .limit(1);
+        .where(eq(facebookConnections.userId, userId));
 
-      const connection = connectionRows[0];
+      const activeConnections = connectionRows.filter(
+        (row) => row.status === 'active'
+      );
 
-      console.log('[Facebook] Connection found:', !!connection);
+      console.log('[Facebook] Active connections found:', activeConnections.length);
 
-      if (!connection) {
+      if (activeConnections.length === 0) {
         results.facebook = {
           success: false,
           message: 'Facebook is not connected. Please connect Facebook first.',
           requiresFacebookConnection: true,
         };
-      } else if (connection.status !== 'active') {
-        results.facebook = {
-          success: false,
-          message: `Facebook connection status is "${connection.status}". Please reconnect Facebook.`,
-        };
       } else {
 
-        const pageId = String(connection.pageId || '').trim();
+        // No explicit selection -> use every active connected Page.
+        const targetConnections =
+          requestedFacebookPageIds.length > 0
+            ? activeConnections.filter((row) =>
+                requestedFacebookPageIds.includes(String(row.pageId))
+              )
+            : activeConnections;
 
-        let pageAccessToken = '';
-
-        try {
-          pageAccessToken = decryptFacebookToken(
-            String(connection.accessToken || '')
-          );
-        } catch (error) {
-          console.error('[Facebook] Token decryption failed:', error);
-        }
-
-        if (!pageId || !pageAccessToken) {
+        if (targetConnections.length === 0) {
           results.facebook = {
             success: false,
-            message: 'Facebook connection is missing required fields',
+            message:
+              'None of the selected Facebook Pages are connected to this user.',
+            requestedTargets: requestedFacebookPageIds,
+            availableTargets: activeConnections.map((row) => String(row.pageId)),
           };
         } else {
 
-          try {
-            const facebookResult = await publishToFacebook({
-              pageId,
-              pageAccessToken,
-              imageUrl: originalImageUrl,
-              caption,
-            });
+          const posted: { pageId: string; photoId: string; postId: string }[] = [];
+          const failedTargets: { pageId: string; message: string }[] = [];
 
-            results.facebook = {
-              success: true,
-              photoId: facebookResult.photoId,
-              postId: facebookResult.postId,
-              imageUrl: originalImageUrl,
-            };
+          for (const connection of targetConnections) {
 
-            // Best-effort — don't fail the whole request if this update fails.
+            const pageId = String(connection.pageId || '').trim();
+
+            let pageAccessToken = '';
+
             try {
-              await db
-                .update(facebookConnections)
-                .set({
-                  lastPublishAt: new Date(),
-                  lastError: null,
-                })
-                .where(eq(facebookConnections.userId, userId));
-            } catch (updateError) {
-              console.error('[Facebook] Failed to update lastPublishAt:', updateError);
+              pageAccessToken = decryptFacebookToken(
+                String(connection.accessToken || '')
+              );
+            } catch (error) {
+              console.error(
+                '[Facebook] Token decryption failed for', pageId, error
+              );
             }
 
-          } catch (error: any) {
-            console.error('[Facebook] Publishing failed:', error);
-
-            results.facebook = {
-              success: false,
-              message: error?.message || 'Facebook publishing failed',
-              imageUrl: originalImageUrl,
-            };
+            if (!pageId || !pageAccessToken) {
+              failedTargets.push({
+                pageId,
+                message: 'Facebook connection is missing required fields',
+              });
+              continue;
+            }
 
             try {
-              await db
-                .update(facebookConnections)
-                .set({ lastError: error?.message || 'Facebook publishing failed' })
-                .where(eq(facebookConnections.userId, userId));
-            } catch (updateError) {
-              console.error('[Facebook] Failed to update lastError:', updateError);
+              const facebookResult = await publishToFacebook({
+                pageId,
+                pageAccessToken,
+                imageUrl: originalImageUrl,
+                caption,
+              });
+
+              posted.push({
+                pageId,
+                photoId: facebookResult.photoId,
+                postId: facebookResult.postId,
+              });
+
+              await recordBannerPublication({
+                bannerId,
+                userId,
+                platform: 'facebook',
+                externalId: facebookResult.postId,
+              });
+
+              // Best-effort — don't fail the whole request if this update fails.
+              try {
+                await db
+                  .update(facebookConnections)
+                  .set({
+                    lastPublishAt: new Date(),
+                    lastError: null,
+                  })
+                  .where(
+                    and(
+                      eq(facebookConnections.userId, userId),
+                      eq(facebookConnections.pageId, pageId)
+                    )
+                  );
+              } catch (updateError) {
+                console.error(
+                  '[Facebook] Failed to update lastPublishAt for', pageId, updateError
+                );
+              }
+
+            } catch (error: any) {
+              console.error('[Facebook] Publishing failed for', pageId, error);
+
+              failedTargets.push({
+                pageId,
+                message: error?.message || 'Facebook publishing failed',
+              });
+
+              try {
+                await db
+                  .update(facebookConnections)
+                  .set({ lastError: error?.message || 'Facebook publishing failed' })
+                  .where(
+                    and(
+                      eq(facebookConnections.userId, userId),
+                      eq(facebookConnections.pageId, pageId)
+                    )
+                  );
+              } catch (updateError) {
+                console.error(
+                  '[Facebook] Failed to update lastError for', pageId, updateError
+                );
+              }
             }
           }
+
+          results.facebook = {
+            success: posted.length > 0,
+            requestedTargets:
+              requestedFacebookPageIds.length > 0
+                ? requestedFacebookPageIds
+                : activeConnections.map((row) => String(row.pageId)),
+            availableTargets: activeConnections.map((row) => String(row.pageId)),
+            posted,
+            failed: failedTargets,
+            photoId: posted[0]?.photoId,
+            postId: posted[0]?.postId,
+            message:
+              posted.length > 0
+                ? failedTargets.length > 0
+                  ? `Posted to ${posted.length} Facebook Page(s); ${failedTargets.length} failed: ${failedTargets.map((f) => f.message).join('; ')}`
+                  : undefined
+                : failedTargets.map((f) => f.message).join('; ') ||
+                  'Facebook publishing failed',
+            imageUrl: originalImageUrl,
+          };
         }
       }
     }
 
 
-    /* WHATSAPP */
+    /* =====================================================
+       LINKEDIN — backed by social_accounts (provider = 'linkedin').
+       Posts to every author URN chosen in the picker (personal
+       profile and/or company pages). Falls back to the personal
+       profile when none were sent.
+    ===================================================== */
+
+    if (wantsLinkedin) {
+
+      console.log('[LinkedIn] Looking for connection:', { userId, linkedinOwnerUrns });
+
+      const connectionRows = await db
+        .select()
+        .from(socialAccounts)
+        .where(
+          and(
+            eq(socialAccounts.userId, userId),
+            eq(socialAccounts.provider, 'linkedin')
+          )
+        )
+        .limit(1);
+
+      const connection = connectionRows[0];
+
+      console.log('[LinkedIn] Connection found:', !!connection);
+
+      if (!connection) {
+        results.linkedin = {
+          success: false,
+          message: 'LinkedIn is not connected. Please connect LinkedIn first.',
+          requiresLinkedinConnection: true,
+        };
+      } else if (
+        connection.expiresAt &&
+        new Date(connection.expiresAt).getTime() <= Date.now()
+      ) {
+        results.linkedin = {
+          success: false,
+          message: 'LinkedIn access token has expired. Please reconnect LinkedIn.',
+          requiresLinkedinConnection: true,
+        };
+      } else {
+
+        const metadata = parseAccountMetadata(connection.metadata);
+
+        const providerAccountId = String(connection.providerAccountId || '').trim();
+
+        const personalUrn = providerAccountId
+          ? `urn:li:person:${providerAccountId}`
+          : '';
+
+        const storedPersonalUrn = String(
+          metadata.ownerUrn || personalUrn
+        ).trim();
+
+        const storedOrganizations = Array.isArray(metadata.organizations)
+          ? metadata.organizations
+              .map((organization: any) => ({
+                urn: String(organization?.urn || '').trim(),
+                id: String(organization?.id || '').trim(),
+                name: String(organization?.name || '').trim(),
+              }))
+              .filter(
+                (organization: { urn: string }) =>
+                  /^urn:li:organization:[A-Za-z0-9_-]+$/.test(organization.urn)
+              )
+          : [];
+
+        // If the frontend did not explicitly select a target, default to
+        // the connected member's personal LinkedIn profile.
+        const targets: string[] =
+          linkedinOwnerUrns.length > 0
+            ? linkedinOwnerUrns
+            : [storedPersonalUrn].filter(Boolean);
+
+        // Security: a client may only publish as the connected member or
+        // as an organization discovered for that member during OAuth.
+        const allowedTargets = new Set<string>([
+          storedPersonalUrn,
+          personalUrn,
+          ...storedOrganizations.map(
+            (organization: { urn: string }) => organization.urn
+          ),
+        ].filter(Boolean));
+
+        const unauthorizedTargets = targets.filter(
+          (target) => !allowedTargets.has(target)
+        );
+
+        // Tokens in social_accounts are stored as-is (not encrypted).
+        const accessToken = String(connection.accessToken || '').trim();
+
+        if (unauthorizedTargets.length > 0) {
+          results.linkedin = {
+            success: false,
+            message:
+              `One or more selected LinkedIn targets are not authorized for this connection: ${unauthorizedTargets.join(', ')}`,
+            requestedTargets: targets,
+            availableTargets: [
+              storedPersonalUrn,
+              ...storedOrganizations.map(
+                (organization: { urn: string }) => organization.urn
+              ),
+            ].filter(Boolean),
+          };
+        } else if (!accessToken || targets.length === 0) {
+          results.linkedin = {
+            success: false,
+            message: 'LinkedIn connection is missing required fields',
+            requiresLinkedinConnection: true,
+          };
+        } else {
+
+          const posted: { ownerUrn: string; postId: string; permalink: string }[] = [];
+          const failedTargets: { ownerUrn: string; message: string }[] = [];
+          let authFailed = false;
+
+          for (const ownerUrn of targets) {
+            try {
+              const linkedinResult = await publishToLinkedIn({
+                ownerUrn,
+                accessToken,
+                imageUrl: originalImageUrl,
+                caption,
+              });
+
+              posted.push({
+                ownerUrn,
+                postId: linkedinResult.postId,
+                permalink: linkedinResult.permalink,
+              });
+
+              await recordBannerPublication({
+                bannerId,
+                userId,
+                platform: 'linkedin',
+                externalId: linkedinResult.postId,
+                permalink: linkedinResult.permalink,
+              });
+
+            } catch (error: any) {
+              console.error('[LinkedIn] Publishing failed for', ownerUrn, error);
+
+              failedTargets.push({
+                ownerUrn,
+                message: error?.message || 'LinkedIn publishing failed',
+              });
+
+              if (error instanceof LinkedInAuthError) {
+                authFailed = true;
+                break; // same token for every target — no point continuing
+              }
+            }
+          }
+
+          results.linkedin = {
+            success: posted.length > 0,
+            requestedTargets: targets,
+            availableTargets: [
+              storedPersonalUrn,
+              ...storedOrganizations.map(
+                (organization: { urn: string }) => organization.urn
+              ),
+            ].filter(Boolean),
+            posted,
+            failed: failedTargets,
+            postId: posted[0]?.postId,
+            permalink: posted[0]?.permalink,
+            message:
+              posted.length > 0
+                ? failedTargets.length > 0
+                  ? `Posted to ${posted.length} LinkedIn account(s); ${failedTargets.length} failed: ${failedTargets.map((f) => f.message).join('; ')}`
+                  : undefined
+                : authFailed
+                  ? 'LinkedIn session expired. Please reconnect LinkedIn.'
+                  : failedTargets.map((f) => f.message).join('; ') ||
+                    'LinkedIn publishing failed',
+            requiresLinkedinConnection: authFailed || undefined,
+            imageUrl: originalImageUrl,
+          };
+        }
+      }
+    }
+
+
+    /* =====================================================
+       WHATSAPP
+    ===================================================== */
 
     if (wantsWhatsapp) {
 
@@ -864,9 +1722,6 @@ export async function POST(req: NextRequest) {
       } else {
 
         const phoneNumberId = String(connection.phoneNumberId || '').trim();
-
-        // NOTE: confirm whether this token is stored encrypted like Facebook's.
-        // If so, swap this for a decrypt call (e.g. decryptWhatsappToken).
         const accessToken = String(connection.accessToken || '').trim();
 
         if (!phoneNumberId || !accessToken) {
@@ -876,6 +1731,42 @@ export async function POST(req: NextRequest) {
           };
         } else {
 
+          console.log('[WhatsApp] Connection diagnostics:', {
+            apiVersion: META_GRAPH_VERSION,
+            phoneNumberId,
+            accessTokenPresent: Boolean(accessToken),
+            accessTokenLength: accessToken.length,
+          });
+
+          // Verify the sender before reading/sending the contact list.
+          // This catches stale tokens / wrong Phone Number IDs early.
+          try {
+            const sender = await verifyWhatsappSender({
+              phoneNumberId,
+              accessToken,
+            });
+
+            console.log('[WhatsApp] Sender verified:', {
+              phoneNumberId: sender.id,
+              displayPhoneNumber: sender.display_phone_number || null,
+              verifiedName: sender.verified_name || null,
+            });
+          } catch (error: any) {
+            console.error('[WhatsApp] Sender verification failed:', error);
+
+            results.whatsapp = {
+              success: false,
+              message:
+                error?.message ||
+                'WhatsApp sender verification failed. Please reconnect WhatsApp.',
+              requiresWhatsappConnection: true,
+            };
+          }
+
+          if (results.whatsapp) {
+            // Sender validation already produced a concrete result.
+            // Do not continue into broadcast logic.
+          } else {
           const contactRows = await db
             .select({
               phoneNumber: whatsappContacts.phoneNumber,
@@ -892,31 +1783,186 @@ export async function POST(req: NextRequest) {
           console.log('[WhatsApp] Active contacts found:', contactRows.length);
 
           if (contactRows.length === 0) {
+
+            // Work out WHY there are none, so the message is actionable.
+            const allContacts = await db
+              .select({ isActive: whatsappContacts.isActive })
+              .from(whatsappContacts)
+              .where(eq(whatsappContacts.userId, userId));
+
+            console.log('[WhatsApp] Contacts for user', userId, {
+              total: allContacts.length,
+            });
+
             results.whatsapp = {
               success: false,
-              message: 'No active WhatsApp contacts found to broadcast to.',
+              message:
+                allContacts.length === 0
+                  ? `No WhatsApp contacts saved for this account (user ${userId}). Add contacts first.`
+                  : `${allContacts.length} contact(s) found for this account, but none are active.`,
             };
+
           } else {
 
-            const { sent, failed } = await publishToWhatsappContacts({
-              phoneNumberId,
-              accessToken,
-              imageUrl: originalImageUrl,
-              caption,
-              contacts: contactRows,
-            });
+            const { sent, sentViaTemplate, failed } =
+              await publishToWhatsappContacts({
+                phoneNumberId,
+                accessToken,
+                imageUrl: originalImageUrl,
+                caption,
+                contacts: contactRows,
+              });
 
             results.whatsapp = {
               success: sent.length > 0,
               sentCount: sent.length,
               failedCount: failed.length,
               sent,
+              sentViaTemplate,
               failed,
+              message:
+                sent.length === 0
+                  ? failed.map((f) => f.error).slice(0, 3).join('; ') ||
+                    'WhatsApp broadcast failed'
+                  : failed.length > 0
+                    ? `Sent to ${sent.length} contact(s); ${failed.length} failed.`
+                    : undefined,
+              imageUrl: originalImageUrl,
+            };
+
+            // WhatsApp is a broadcast (no single "post"), so there's no
+            // externalId to look up insights for later — intentionally
+            // not recorded in bannerPublications.
+          }
+          }
+        }
+      }
+    }
+
+
+    /* =====================================================
+       GOOGLE BUSINESS — backed by social_accounts (provider =
+       'google_business'). accountId/locationId come out of the
+       `metadata` JSON column.
+    ===================================================== */
+
+    if (wantsGoogleBusiness) {
+
+      console.log('[GoogleBusiness] Looking for connection:', { userId });
+
+      const connectionRows = await db
+        .select()
+        .from(socialAccounts)
+        .where(
+          and(
+            eq(socialAccounts.userId, userId),
+            eq(socialAccounts.provider, 'google_business')
+          )
+        )
+        .limit(1);
+
+      const connection = connectionRows[0];
+
+      console.log('[GoogleBusiness] Connection found:', !!connection);
+
+      if (!connection) {
+        results.google_business = {
+          success: false,
+          message: 'Google Business is not connected. Please connect Google Business first.',
+          requiresGoogleBusinessConnection: true,
+        };
+      } else {
+
+        const metadata = parseAccountMetadata((connection as any).metadata);
+
+        const accountId =
+          String(metadata.accountId || connection.providerAccountId || '').trim();
+        const locationId = String(metadata.locationId || '').trim();
+
+        // NOTE: Google OAuth access tokens expire (~1hr). This assumes
+        // connection.accessToken is already fresh. If you store a
+        // refreshToken (socialAccounts has one), refresh it here before
+        // using it — otherwise this will start failing an hour after
+        // connecting.
+        const accessToken = String(connection.accessToken || '').trim();
+
+        if (!accountId || !locationId || !accessToken) {
+          results.google_business = {
+            success: false,
+            message: !locationId
+              ? 'Google Business connection is missing a locationId in metadata. Backfill social_accounts.metadata for this user/provider.'
+              : 'Google Business connection is missing required fields',
+          };
+        } else {
+
+          try {
+            const gbResult = await publishToGoogleBusiness({
+              accountId,
+              locationId,
+              accessToken,
+              imageUrl: originalImageUrl,
+              caption,
+            });
+
+            results.google_business = {
+              success: true,
+              postName: gbResult.postName,
+              searchUrl: gbResult.searchUrl,
+              imageUrl: originalImageUrl,
+            };
+
+            await recordBannerPublication({
+              bannerId,
+              userId,
+              platform: 'google_business',
+              externalId: gbResult.postName,
+              permalink: gbResult.searchUrl,
+            });
+
+          } catch (error: any) {
+            console.error('[GoogleBusiness] Publishing failed:', error);
+
+            results.google_business = {
+              success: false,
+              message: error?.message || 'Google Business publishing failed',
               imageUrl: originalImageUrl,
             };
           }
         }
       }
+    }
+
+
+    /* =====================================================
+       YOUTUBE — checked against social_accounts (provider =
+       'youtube'). Still reports "not supported" since the YouTube
+       Data API has no endpoint for posting a static image.
+    ===================================================== */
+
+    if (wantsYoutube) {
+
+      console.log('[YouTube] Publish requested but not supported by the public API');
+
+      const connectionRows = await db
+        .select()
+        .from(socialAccounts)
+        .where(
+          and(
+            eq(socialAccounts.userId, userId),
+            eq(socialAccounts.provider, 'youtube')
+          )
+        )
+        .limit(1);
+
+      const connection = connectionRows[0];
+
+      results.youtube = {
+        success: false,
+        message: connection
+          ? "YouTube doesn't support publishing a static image as a public post via the API. YouTube is connected for analytics only."
+          : 'YouTube is not connected.',
+        supported: false,
+      };
     }
 
 
@@ -931,14 +1977,22 @@ export async function POST(req: NextRequest) {
       .map(([platform]) => platform);
 
     if (successfulPlatforms.length === 0) {
+
+      const firstReason = Object.values(results)
+        .map((r: any) => r?.message)
+        .find((m) => typeof m === 'string' && m.length > 0);
+
+      // 422: the request was valid, but nothing could be published.
       return NextResponse.json(
         {
           success: false,
-          message: 'No platform was successfully published',
+          message: firstReason
+            ? `No platform was successfully published: ${firstReason}`
+            : 'No platform was successfully published',
           bannerId,
           results,
         },
-        { status: 400 }
+        { status: 422 }
       );
     }
 

@@ -1,45 +1,36 @@
 // src/app/api/whatsapp/session/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import crypto from 'crypto';
 
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
+import { createWhatsAppSession } from '@/lib/whatsappSession';
+import { corsHeaders } from '@/lib/cors';
 
-interface SessionPayload {
-  userId: string;
-  exp: number;
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+const APP_CALLBACK_URL = 'aarnamarket://whatsapp-callback';
+
+function json(origin: string | null, body: unknown, status = 200) {
+  return NextResponse.json(body, { status, headers: corsHeaders(origin) });
 }
 
-function base64UrlEncode(value: string): string {
-  return Buffer.from(value, 'utf8')
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-}
-
-function createSignature(payload: string, secret: string): string {
-  return crypto
-    .createHmac('sha256', secret)
-    .update(payload)
-    .digest('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
+export async function OPTIONS(req: NextRequest) {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders(req.headers.get('origin')),
+  });
 }
 
 export async function POST(req: NextRequest) {
+  const origin = req.headers.get('origin');
+
   try {
-    const SESSION_SECRET = process.env.WHATSAPP_SESSION_SECRET;
-
-    if (!SESSION_SECRET) {
+    if (!process.env.WHATSAPP_SESSION_SECRET) {
       console.error('WHATSAPP_SESSION_SECRET is missing');
-
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'WhatsApp session configuration is missing',
-        },
-        { status: 500 }
+      return json(
+        origin,
+        { success: false, message: 'WhatsApp session configuration is missing' },
+        500
       );
     }
 
@@ -48,42 +39,27 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const callbackUrl = String(body?.callbackUrl || '');
 
-    if (callbackUrl !== 'aarnamarket://whatsapp-callback') {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Invalid WhatsApp callback URL',
-        },
-        { status: 400 }
-      );
+    if (callbackUrl !== APP_CALLBACK_URL) {
+      return json(origin, { success: false, message: 'Invalid WhatsApp callback URL' }, 400);
     }
 
-    const payload: SessionPayload = {
-      userId: String(userId),
-      exp: Date.now() + 10 * 60 * 1000,
-    };
+    // Signed, 10-minute session containing userId
+    const sessionId = createWhatsAppSession(userId);
 
-    const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-    const signature = createSignature(encodedPayload, SESSION_SECRET);
-    const sessionId = `${encodedPayload}.${signature}`;
+    // NEXT_PUBLIC_APP_URL optional hai — sirf tab callbackHttpsUrl banao jab set ho,
+    // warna missing env poora connect flow block kar deta tha.
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, '');
+    const callbackHttpsUrl = appUrl
+      ? `${appUrl}/api/whatsapp/callback?session=${encodeURIComponent(sessionId)}`
+      : undefined;
 
-    return NextResponse.json({
-      success: true,
-      sessionId,
-    });
+    return json(origin, { success: true, sessionId, callbackHttpsUrl });
   } catch (error) {
     if (error instanceof AuthError) {
-      return NextResponse.json(
-        { success: false, message: error.message },
-        { status: 401 }
-      );
+      return json(origin, { success: false, message: error.message }, 401);
     }
 
     console.error('WhatsApp session error:', error);
-
-    return NextResponse.json(
-      { success: false, message: 'Could not create WhatsApp session' },
-      { status: 500 }
-    );
+    return json(origin, { success: false, message: 'Could not create WhatsApp session' }, 500);
   }
 }

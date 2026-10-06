@@ -1,281 +1,571 @@
-//src/app/api/whatsApp/connect/route.ts
+// src/app/api/whatsapp/connect/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/db";
+import { whatsappConnections } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
-import { NextRequest, NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+const GRAPH_VERSION =
+  process.env.META_GRAPH_VERSION || "v26.0";
 
-import { db } from '@/db';
-import { whatsappConnections } from '@/db/schema';
-import { getUserIdFromRequest, AuthError } from '@/lib/auth';
-import {verifyWhatsAppSession,} from '@/lib/whatsappSession';
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+const GRAPH_URL =
+  `https://graph.facebook.com/${GRAPH_VERSION}`;
 
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v23.0';
-const GRAPH = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
-type GraphError = {
-  message?: string;
-  type?: string;
-  code?: number;
-  error_subcode?: number;
-  error_user_msg?: string;
-  fbtrace_id?: string;
-};
-
-type ConnectBody = {
-  code?: unknown;
-  wabaId?: unknown;
-  phoneNumberId?: unknown;
-};
-
-function fail(
-  step: string,
+function jsonError(
   message: string,
   status = 400,
-  detail?: GraphError
+  extra: Record<string, unknown> = {}
 ) {
   return NextResponse.json(
     {
       success: false,
-      step,
-      message:
-        detail?.error_user_msg || detail?.message || message,
-      detail: detail
-        ? {
-            code: detail.code,
-            subcode: detail.error_subcode,
-            type: detail.type,
-            fbtrace_id: detail.fbtrace_id,
-          }
-        : undefined,
+      message,
+      ...extra,
     },
     { status }
   );
 }
 
-async function graph<T>(
-  url: string,
-  init: RequestInit
-): Promise<{ ok: boolean; data: T & { error?: GraphError } }> {
-  const res = await fetch(url, { ...init, cache: 'no-store' });
-  const data = (await res.json().catch(() => ({}))) as T & {
-    error?: GraphError;
-  };
-  return { ok: res.ok && !data.error, data };
-}
 
-export async function POST(req: NextRequest) {
+export async function POST(
+  req: NextRequest
+) {
+
   try {
-    const userId = getUserIdFromRequest(req);
 
-    const body = (await req.json().catch(() => ({}))) as ConnectBody;
+    /* =====================================================
+       AUTHENTICATION
+    ===================================================== */
+
+    /*
+     * Replace this with your existing authenticated-user
+     * lookup if you already have one.
+     *
+     * IMPORTANT:
+     * Do not trust userId coming from browser.
+     */
+
+    const userIdHeader =
+      req.headers.get("x-user-id");
+
+    const userId =
+      userIdHeader
+        ? Number(userIdHeader)
+        : null;
+
+
+    if (
+      !userId ||
+      !Number.isFinite(userId)
+    ) {
+
+      return jsonError(
+        "Authenticated user was not found.",
+        401
+      );
+
+    }
+
+
+    /* =====================================================
+       REQUEST
+    ===================================================== */
+
+    const body =
+      await req.json();
+
 
     const code =
-      typeof body.code === 'string' ? body.code.trim() : '';
+      typeof body.code === "string"
+        ? body.code.trim()
+        : "";
+
+
     const wabaId =
-      typeof body.wabaId === 'string' ? body.wabaId.trim() : '';
-    const phoneNumberId =
-      typeof body.phoneNumberId === 'string'
+      typeof body.wabaId === "string"
+        ? body.wabaId.trim()
+        : "";
+
+
+    let phoneNumberId =
+      typeof body.phoneNumberId === "string"
         ? body.phoneNumberId.trim()
-        : '';
+        : "";
 
-    console.log('[WhatsApp] Connect request:', {
-      userId,
-      codeLength: code.length,
-      wabaId,
-      phoneNumberId,
-      graphVersion: GRAPH_VERSION,
-    });
 
-    const missing = [
-      !code && 'code',
-      !wabaId && 'wabaId',
-      !phoneNumberId && 'phoneNumberId',
-    ].filter(Boolean);
+    if (!code) {
 
-    if (missing.length) {
-      return fail(
-        'validation',
-        `Missing required field(s): ${missing.join(', ')}`
+      return jsonError(
+        "Missing Meta authorization code."
       );
+
     }
 
-    const appId = process.env.META_FACEBOOK_APP_ID;
-    const appSecret = process.env.META_APP_SECRET;
 
-    if (!appId || !appSecret) {
-      console.error('[WhatsApp] META_FACEBOOK_APP_ID / META_APP_SECRET not set');
-      return fail(
-        'config',
-        'Server is missing Meta credentials',
+    if (!wabaId) {
+
+      return jsonError(
+        "Missing WhatsApp Business Account ID."
+      );
+
+    }
+
+
+    /* =====================================================
+       META APP CREDENTIALS
+    ===================================================== */
+
+    const appId =
+      process.env.META_APP_ID;
+
+    const appSecret =
+      process.env.META_APP_SECRET;
+
+
+    if (!appId) {
+
+      return jsonError(
+        "META_APP_ID is not configured.",
         500
       );
+
     }
 
-    // STEP 1 — exchange the Embedded Signup code for a business token.
-    // No redirect_uri here: the code came from FB.login, not a redirect.
-    const tokenParams = new URLSearchParams({
-      client_id: appId,
-      client_secret: appSecret,
-      code,
-    });
 
-    const token = await graph<{ access_token?: string }>(
-      `${GRAPH}/oauth/access_token?${tokenParams}`,
-      { method: 'GET' }
-    );
+    if (!appSecret) {
 
-    if (!token.ok || !token.data.access_token) {
-      console.error('[WhatsApp] Token exchange failed:', token.data);
-      return fail(
-        'token_exchange',
-        'Unable to exchange WhatsApp signup code. Codes expire in ~30s and are single-use.',
-        400,
-        token.data.error
+      return jsonError(
+        "META_APP_SECRET is not configured.",
+        500
       );
+
     }
 
-    const accessToken = token.data.access_token;
 
-    // STEP 2 — confirm the token really grants access to this WABA and phone,
-    // and pull the display details in one call.
-    const phone = await graph<{
-      id?: string;
-      display_phone_number?: string;
-      verified_name?: string;
-      quality_rating?: string;
-    }>(
-      `${GRAPH}/${encodeURIComponent(
-        phoneNumberId
-      )}?fields=id,display_phone_number,verified_name,quality_rating`,
-      {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
+    /* =====================================================
+       1. EXCHANGE EMBEDDED SIGNUP CODE
+    ===================================================== */
 
-    if (!phone.ok) {
-      console.error('[WhatsApp] Phone lookup failed:', phone.data);
-      return fail(
-        'phone_lookup',
-        'Unable to retrieve WhatsApp phone information',
-        400,
-        phone.data.error
+    const tokenUrl =
+      new URL(
+        `${GRAPH_URL}/oauth/access_token`
       );
-    }
 
-    // STEP 3 — subscribe your app to the WABA so webhooks fire.
-    // No body, and no Content-Type header.
-    const subscribe = await graph<{ success?: boolean }>(
-      `${GRAPH}/${encodeURIComponent(wabaId)}/subscribed_apps`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
+
+    tokenUrl.searchParams.set(
+      "client_id",
+      appId
     );
 
-    if (!subscribe.ok) {
-      console.error('[WhatsApp] WABA subscription failed:', subscribe.data);
-      return fail(
-        'subscribe',
-        'Failed to subscribe app to WhatsApp Business Account',
-        400,
-        subscribe.data.error
+
+    tokenUrl.searchParams.set(
+      "client_secret",
+      appSecret
+    );
+
+
+    tokenUrl.searchParams.set(
+      "code",
+      code
+    );
+
+
+    console.log(
+      "[WhatsApp] Exchanging Embedded Signup code..."
+    );
+
+
+    const tokenResponse =
+      await fetch(
+        tokenUrl.toString(),
+        {
+          method: "GET",
+          cache: "no-store",
+        }
       );
+
+
+    const tokenData =
+      await tokenResponse
+        .json()
+        .catch(() => ({}));
+
+
+    if (
+      !tokenResponse.ok ||
+      !tokenData.access_token
+    ) {
+
+      console.error(
+        "[WhatsApp] Token exchange failed:",
+        tokenData
+      );
+
+
+      return jsonError(
+        tokenData?.error?.message ||
+        "Meta authorization code exchange failed.",
+        400
+      );
+
     }
 
-    // STEP 4 — register the number on Cloud API. Required before you can send.
-    // Already-registered numbers return an error we can safely ignore.
-    const pin =
-      process.env.WHATSAPP_REGISTER_PIN &&
-      /^\d{6}$/.test(process.env.WHATSAPP_REGISTER_PIN)
-        ? process.env.WHATSAPP_REGISTER_PIN
-        : '000000';
 
-    const register = await graph<{ success?: boolean }>(
-      `${GRAPH}/${encodeURIComponent(phoneNumberId)}/register`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ messaging_product: 'whatsapp', pin }),
+    const accessToken =
+      tokenData.access_token;
+
+
+    /* =====================================================
+       2. GET WABA
+    ===================================================== */
+
+    const wabaResponse =
+      await fetch(
+        `${GRAPH_URL}/${encodeURIComponent(
+          wabaId
+        )}?fields=id,name`,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
+          },
+          cache: "no-store",
+        }
+      );
+
+
+    const wabaData =
+      await wabaResponse
+        .json()
+        .catch(() => ({}));
+
+
+    if (
+      !wabaResponse.ok ||
+      !wabaData.id
+    ) {
+
+      console.error(
+        "[WhatsApp] WABA lookup failed:",
+        wabaData
+      );
+
+
+      return jsonError(
+        wabaData?.error?.message ||
+        "Unable to access WhatsApp Business Account.",
+        400
+      );
+
+    }
+
+
+    /* =====================================================
+       3. DISCOVER PHONE NUMBER
+    ===================================================== */
+
+    if (!phoneNumberId) {
+
+      console.log(
+        "[WhatsApp] Discovering phone number from WABA..."
+      );
+
+
+      const phoneResponse =
+        await fetch(
+          `${GRAPH_URL}/${encodeURIComponent(
+            wabaId
+          )}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating`,
+          {
+            headers: {
+              Authorization:
+                `Bearer ${accessToken}`,
+            },
+            cache: "no-store",
+          }
+        );
+
+
+      const phoneData =
+        await phoneResponse
+          .json()
+          .catch(() => ({}));
+
+
+      console.log(
+        "[WhatsApp] Phone number response:",
+        phoneData
+      );
+
+
+      if (
+        !phoneResponse.ok ||
+        !Array.isArray(phoneData.data) ||
+        phoneData.data.length === 0
+      ) {
+
+        return jsonError(
+          phoneData?.error?.message ||
+          "No WhatsApp phone number was found under this WABA.",
+          400
+        );
+
       }
+
+
+      /*
+       * If multiple numbers exist, you should eventually
+       * let the user choose one.
+       *
+       * For now use the first returned number.
+       */
+
+      phoneNumberId =
+        phoneData.data[0].id;
+
+    }
+
+
+    /* =====================================================
+       4. GET PHONE DETAILS
+    ===================================================== */
+
+    const phoneResponse =
+      await fetch(
+        `${GRAPH_URL}/${encodeURIComponent(
+          phoneNumberId
+        )}?fields=id,display_phone_number,verified_name,quality_rating`,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
+          },
+          cache: "no-store",
+        }
+      );
+
+
+    const phoneData =
+      await phoneResponse
+        .json()
+        .catch(() => ({}));
+
+
+    if (
+      !phoneResponse.ok ||
+      !phoneData.id
+    ) {
+
+      console.error(
+        "[WhatsApp] Phone lookup failed:",
+        phoneData
+      );
+
+
+      return jsonError(
+        phoneData?.error?.message ||
+        "Unable to access WhatsApp phone number.",
+        400
+      );
+
+    }
+
+
+    /* =====================================================
+       5. SUBSCRIBE WABA TO APP
+    ===================================================== */
+
+    const subscribeResponse =
+      await fetch(
+        `${GRAPH_URL}/${encodeURIComponent(
+          wabaId
+        )}/subscribed_apps`,
+        {
+          method: "POST",
+
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
+          },
+
+          cache: "no-store",
+        }
+      );
+
+
+    const subscribeData =
+      await subscribeResponse
+        .json()
+        .catch(() => ({}));
+
+
+    console.log(
+      "[WhatsApp] WABA subscription:",
+      subscribeData
     );
 
-    if (!register.ok) {
-      // 133005 = wrong PIN on an already-registered number, 133010 = already registered.
-      const c = register.data.error?.code;
-      const sub = register.data.error?.error_subcode;
-      const benign = c === 133010 || sub === 2388008 || sub === 2388009;
-      if (!benign) {
-        console.warn('[WhatsApp] Register warning:', register.data);
-      }
+
+    if (
+      !subscribeResponse.ok
+    ) {
+
+      return jsonError(
+        subscribeData?.error?.message ||
+        "Unable to subscribe WhatsApp Business Account to the app.",
+        400
+      );
+
     }
 
-    // STEP 5 — persist.
-    const record = {
+
+    /* =====================================================
+       6. IMPORTANT:
+          DO NOT CALL /register HERE FOR COEXISTENCE
+    ===================================================== */
+
+    /*
+     * The number already belongs to WhatsApp Business App.
+     *
+     * Do NOT do this:
+     *
+     * POST /{phoneNumberId}/register
+     *
+     * with a fake/default PIN such as 000000.
+     *
+     * That is not the correct way to handle an existing
+     * WhatsApp Business App coexistence number.
+     */
+
+
+    /* =====================================================
+       7. SAVE CONNECTION
+    ===================================================== */
+
+    const existing =
+      await db
+        .select({
+          id: whatsappConnections.id,
+        })
+        .from(whatsappConnections)
+        .where(
+          eq(
+            whatsappConnections.userId,
+            userId
+          )
+        )
+        .limit(1);
+
+
+    const connectionData = {
+
       wabaId,
+
       phoneNumberId,
-      businessPhoneNumber: phone.data.display_phone_number ?? null,
-      businessName: phone.data.verified_name ?? null,
+
+      businessPhoneNumber:
+        phoneData.display_phone_number ||
+        null,
+
+      businessName:
+        phoneData.verified_name ||
+        wabaData.name ||
+        null,
+
       accessToken,
-      status: 'active' as const,
+
+      status: "active" as const,
+
     };
 
-    const existing = await db
-      .select({ id: whatsappConnections.id })
-      .from(whatsappConnections)
-      .where(eq(whatsappConnections.userId, userId))
-      .limit(1);
 
     if (existing.length > 0) {
+
       await db
-        .update(whatsappConnections)
-        .set({ ...record, updatedAt: new Date() })
-        .where(eq(whatsappConnections.userId, userId));
+        .update(
+          whatsappConnections
+        )
+        .set(
+          connectionData
+        )
+        .where(
+          eq(
+            whatsappConnections.userId,
+            userId
+          )
+        );
+
     } else {
+
       await db
-        .insert(whatsappConnections)
-        .values({ userId, ...record });
+        .insert(
+          whatsappConnections
+        )
+        .values({
+          userId,
+          ...connectionData,
+        });
+
     }
 
-    console.log('[WhatsApp] Connection saved:', {
-      userId,
-      wabaId,
-      phoneNumberId,
-      businessPhoneNumber: record.businessPhoneNumber,
-    });
+
+    /* =====================================================
+       SUCCESS
+    ===================================================== */
+
+    console.log(
+      "[WhatsApp] Connection saved:",
+      {
+        userId,
+        wabaId,
+        phoneNumberId,
+        phone:
+          phoneData.display_phone_number,
+      }
+    );
+
 
     return NextResponse.json({
       success: true,
-      message: 'WhatsApp connected successfully',
-      data: {
-        wabaId,
-        phoneNumberId,
-        businessPhoneNumber: record.businessPhoneNumber,
-        businessName: record.businessName,
-        status: 'active',
-      },
-    });
-  } catch (error) {
-    if (error instanceof AuthError) {
-      return NextResponse.json(
-        { success: false, step: 'auth', message: error.message },
-        { status: 401 }
-      );
-    }
 
-    console.error('[WhatsApp] Connect error:', error);
+      message:
+        "WhatsApp Business connected successfully.",
+
+      wabaId,
+
+      phoneNumberId,
+
+      phoneNumber:
+        phoneData.display_phone_number ||
+        null,
+
+      businessName:
+        phoneData.verified_name ||
+        wabaData.name ||
+        null,
+    });
+
+
+  } catch (error) {
+
+    console.error(
+      "[WhatsApp] Connect route error:",
+      error
+    );
+
 
     return NextResponse.json(
       {
         success: false,
-        step: 'unknown',
-        message: 'Failed to connect WhatsApp',
+        message:
+          error instanceof Error
+            ? error.message
+            : "WhatsApp connection failed.",
       },
-      { status: 500 }
+      {
+        status: 500,
+      }
     );
+
   }
+
 }

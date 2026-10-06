@@ -1,0 +1,301 @@
+/// src/app/api/linkedin/callback/route.ts
+
+import { NextRequest, NextResponse } from 'next/server';
+import { and, eq } from 'drizzle-orm';
+
+import { db } from '@/db';
+import { socialAccounts } from '@/db/schema';
+import {
+  getSocialOAuthFrontendUrl,
+  verifySocialOAuthState,
+} from '@/lib/socialOAuth';
+
+/* =========================
+   TYPES
+========================= */
+
+interface LinkedInTokenResponse {
+  access_token?: string;
+  expires_in?: number;
+  refresh_token?: string;
+}
+
+interface LinkedInProfile {
+  sub?: string;
+  name?: string;
+  email?: string;
+}
+
+interface LinkedInOrg {
+  id?: string | number;
+  name?: string;
+  localizedName?: string;
+  vanityName?: string;
+}
+
+interface LinkedInOrgMeta {
+  id: string;
+  urn: string;
+  name: string;
+  role?: string;
+}
+
+type LinkedInMetadata = {
+  ownerUrn: string;
+  personal: {
+    urn: string;
+    id: string;
+    name: string;
+    email?: string;
+  };
+  organizations: LinkedInOrgMeta[];
+  selectedOrgUrn: string | null;
+};
+
+/* =========================
+   CONFIG
+========================= */
+
+// Set LINKEDIN_MOCK_ORGS=true in .env to test org selection UI/flow
+// before the Advertising API / Community Management API product is approved.
+// Remove or set to false once real approval is live.
+const MOCK_ORGS_ENABLED =
+  String(process.env.LINKEDIN_MOCK_ORGS || '').toLowerCase() === 'true';
+
+function redirect(status: string, message?: string) {
+  const url = new URL(`${getSocialOAuthFrontendUrl()}/dashboard`);
+  url.searchParams.set('linkedin', status);
+  if (message) url.searchParams.set('message', message);
+  return NextResponse.redirect(url);
+}
+
+function headers(token: string): HeadersInit {
+  return {
+    Authorization: `Bearer ${token}`,
+    'X-Restli-Protocol-Version': '2.0.0',
+  };
+}
+
+/* =========================
+   MOCK ORG DATA
+========================= */
+
+function mockOrganizations(): LinkedInOrgMeta[] {
+  return [
+    {
+      id: '99999991',
+      urn: 'urn:li:organization:99999991',
+      name: 'Aarnexai Test Page (Mock)',
+      role: 'ADMINISTRATOR',
+    },
+    {
+      id: '99999992',
+      urn: 'urn:li:organization:99999992',
+      name: 'Second Test Page (Mock)',
+      role: 'CONTENT_ADMIN',
+    },
+  ];
+}
+
+/* =========================
+   ORG FETCH
+========================= */
+
+async function fetchOrganizations(accessToken: string) {
+  if (MOCK_ORGS_ENABLED) {
+    console.log('[LinkedIn] Using MOCK organizations (LINKEDIN_MOCK_ORGS=true)');
+    return mockOrganizations();
+  }
+
+  const url = new URL('https://api.linkedin.com/v2/organizationAcls');
+  url.searchParams.set('q', 'roleAssignee');
+
+  const res = await fetch(url.toString(), {
+    headers: headers(accessToken),
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    console.error('[LinkedIn] org fetch failed:', await res.text());
+    return [];
+  }
+
+  const data = await res.json();
+
+  const allowedRoles = new Set([
+    'ADMINISTRATOR',
+    'CONTENT_ADMIN',
+    'DIRECT_SPONSORED_CONTENT_POSTER',
+  ]);
+
+  const orgs: LinkedInOrgMeta[] = [];
+
+  for (const el of data.elements ?? []) {
+    const role = String(el.role || '');
+    const urn = String(el.organization || '');
+
+    if (!allowedRoles.has(role)) continue;
+    if (!urn.startsWith('urn:li:organization:')) continue;
+
+    const id = urn.replace('urn:li:organization:', '');
+
+    let name = `Organization ${id}`;
+
+    try {
+      const r = await fetch(
+        `https://api.linkedin.com/v2/organizations/${id}`,
+        { headers: headers(accessToken) }
+      );
+
+      if (r.ok) {
+        const org = (await r.json()) as LinkedInOrg;
+        name = org.localizedName || org.name || name;
+      }
+    } catch {}
+
+    orgs.push({
+      id,
+      urn,
+      name,
+      role,
+    });
+  }
+
+  return orgs;
+}
+
+/* =========================
+   CALLBACK
+========================= */
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+
+  const code = searchParams.get('code');
+  const state = searchParams.get('state');
+  const error = searchParams.get('error');
+
+  if (error) return redirect('error', error);
+  if (!code || !state) return redirect('error', 'missing_params');
+
+  const stateData = verifySocialOAuthState(state, 'linkedin');
+  if (!stateData) return redirect('error', 'invalid_state');
+
+  try {
+    /* =========================
+       TOKEN EXCHANGE
+    ========================= */
+
+    const tokenRes = await fetch(
+      'https://www.linkedin.com/oauth/v2/accessToken',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code,
+          client_id: process.env.LINKEDIN_CLIENT_ID!,
+          client_secret: process.env.LINKEDIN_CLIENT_SECRET!,
+          redirect_uri: process.env.LINKEDIN_REDIRECT_URI!,
+        }),
+      }
+    );
+
+    if (!tokenRes.ok) {
+      return redirect('error', 'token_exchange_failed');
+    }
+
+    const token: LinkedInTokenResponse = await tokenRes.json();
+    const accessToken = token.access_token;
+    if (!accessToken) return redirect('error', 'missing_token');
+
+    /* =========================
+       PROFILE
+    ========================= */
+
+    const profileRes = await fetch(
+      'https://api.linkedin.com/v2/userinfo',
+      { headers: headers(accessToken) }
+    );
+
+    const profile: LinkedInProfile = profileRes.ok
+      ? await profileRes.json()
+      : {};
+
+    const personalId = profile.sub;
+    if (!personalId) return redirect('error', 'missing_profile');
+
+    const personalUrn = `urn:li:person:${personalId}`;
+
+    /* =========================
+       ORGANIZATIONS
+    ========================= */
+
+    const organizations = await fetchOrganizations(accessToken);
+
+    /* =========================
+       AUTO-SELECT LOGIC
+    ========================= */
+
+    const selectedOrgUrn =
+      organizations.length === 1 ? organizations[0].urn : null;
+
+    const metadata: LinkedInMetadata = {
+      ownerUrn: personalUrn,
+      personal: {
+        urn: personalUrn,
+        id: personalId,
+        name: profile.name || profile.email || 'LinkedIn User',
+        email: profile.email,
+      },
+      organizations,
+      selectedOrgUrn,
+    };
+
+    console.log('[LinkedIn] connected:', {
+      personalUrn,
+      organizations: organizations.length,
+      selectedOrgUrn,
+      mock: MOCK_ORGS_ENABLED,
+    });
+
+    /* =========================
+       UPSERT DB
+    ========================= */
+
+    const [existing] = await db
+      .select()
+      .from(socialAccounts)
+      .where(
+        and(
+          eq(socialAccounts.userId, stateData.userId),
+          eq(socialAccounts.provider, 'linkedin')
+        )
+      )
+      .limit(1);
+
+    const payload = {
+      userId: stateData.userId,
+      provider: 'linkedin',
+      providerAccountId: personalId,
+      accountName: metadata.personal.name,
+      accessToken,
+      refreshToken: token.refresh_token || null,
+      metadata,
+    };
+
+    if (existing) {
+      await db
+        .update(socialAccounts)
+        .set(payload)
+        .where(eq(socialAccounts.id, existing.id));
+    } else {
+      await db.insert(socialAccounts).values(payload);
+    }
+
+    return redirect('connected');
+  } catch (e) {
+    console.error('[LinkedIn Callback] error:', e);
+    return redirect('error', 'connection_failed');
+  }
+}
