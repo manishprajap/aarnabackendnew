@@ -18,9 +18,12 @@ import {
   facebookConnections,
   instagramConnections,
   socialAccounts,
+  whatsappConnections,
+  whatsappConversations,
+  whatsappMessages,
 } from '@/db/schema';
 
-import { eq, and, inArray } from 'drizzle-orm';
+import { eq, and, inArray, count, sum } from 'drizzle-orm';
 
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { decryptFacebookToken } from '@/lib/facebook-token';
@@ -31,6 +34,8 @@ const IG_GRAPH_API_BASE = `https://graph.instagram.com/${META_GRAPH_VERSION}`;
 const LINKEDIN_API_BASE = 'https://api.linkedin.com/v2';
 const YOUTUBE_ANALYTICS_API_BASE = 'https://youtubeanalytics.googleapis.com/v2';
 const GA4_DATA_API_BASE = 'https://analyticsdata.googleapis.com/v1beta';
+const GOOGLE_BUSINESS_PERFORMANCE_API_BASE =
+  'https://businessprofileperformance.googleapis.com/v1';
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
 
@@ -167,6 +172,69 @@ async function fetchLinkedInShareStats(
    this reports the connected channel's overall recent performance
    so it still shows up on the dashboard.
 ========================================================= */
+async function fetchGoogleBusinessLocationStats(
+  locationId: string,
+  accessToken: string
+) {
+  const { startDate, endDate } = dateRange(30);
+  const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+  const [endYear, endMonth, endDay] = endDate.split('-').map(Number);
+  const url = new URL(
+    `${GOOGLE_BUSINESS_PERFORMANCE_API_BASE}/locations/${encodeURIComponent(locationId)}:fetchMultiDailyMetricsTimeSeries`
+  );
+  const metrics = [
+    'BUSINESS_IMPRESSIONS_DESKTOP_SEARCH',
+    'BUSINESS_IMPRESSIONS_DESKTOP_MAPS',
+    'BUSINESS_IMPRESSIONS_MOBILE_SEARCH',
+    'BUSINESS_IMPRESSIONS_MOBILE_MAPS',
+    'WEBSITE_CLICKS',
+    'CALL_CLICKS',
+    'BUSINESS_DIRECTION_REQUESTS',
+  ];
+
+  metrics.forEach((metric) => url.searchParams.append('dailyMetrics', metric));
+  url.searchParams.set('dailyRange.startDate.year', String(startYear));
+  url.searchParams.set('dailyRange.startDate.month', String(startMonth));
+  url.searchParams.set('dailyRange.startDate.day', String(startDay));
+  url.searchParams.set('dailyRange.endDate.year', String(endYear));
+  url.searchParams.set('dailyRange.endDate.month', String(endMonth));
+  url.searchParams.set('dailyRange.endDate.day', String(endDay));
+
+  const response = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+  });
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(getErrorMessage(data, 'Google Business performance request failed'));
+  }
+
+  const totals: Record<string, number> = {};
+  for (const series of data?.multiDailyMetricTimeSeries || []) {
+    for (const metricSeries of series?.dailyMetricTimeSeries || []) {
+      const metric = String(metricSeries?.dailyMetric || '');
+      totals[metric] = (metricSeries?.timeSeries?.datedValues || []).reduce(
+        (total: number, item: any) => total + (Number(item?.value) || 0),
+        0
+      );
+    }
+  }
+
+  return {
+    views:
+      (totals.BUSINESS_IMPRESSIONS_DESKTOP_SEARCH || 0) +
+      (totals.BUSINESS_IMPRESSIONS_DESKTOP_MAPS || 0) +
+      (totals.BUSINESS_IMPRESSIONS_MOBILE_SEARCH || 0) +
+      (totals.BUSINESS_IMPRESSIONS_MOBILE_MAPS || 0),
+    clicks:
+      (totals.WEBSITE_CLICKS || 0) +
+      (totals.CALL_CLICKS || 0),
+    directions: totals.BUSINESS_DIRECTION_REQUESTS || 0,
+    periodDays: 30,
+  };
+}
+
 async function fetchYoutubeChannelStats(channelId: string, accessToken: string) {
   const { startDate, endDate } = dateRange(30);
 
@@ -201,9 +269,9 @@ async function fetchYoutubeChannelStats(channelId: string, accessToken: string) 
    GOOGLE ANALYTICS (GA4) — pageviews/clicks for a banner's
    landing page.
    ASSUMPTION: each banner's click-through link lands on
-   `${PUBLIC_BASE_URL}/p/{bannerId}` (or contains that path).
+   /p/{bannerId} (or contains that path).
    If your banners route to a different URL pattern, change the
-   `CONTAINS` filter value below to match it.
+   CONTAINS filter value below to match it.
 ========================================================= */
 async function fetchGoogleAnalyticsForBanner(
   propertyId: string, // e.g. 'properties/123456789'
@@ -296,20 +364,14 @@ export async function GET(req: NextRequest) {
           .from(bannerPublications)
           .where(eq(bannerPublications.userId, userId));
 
-    if (publicationRows.length === 0) {
-      return NextResponse.json({
-        success: true,
-        message: 'No published banners found for this user yet',
-        banners: [],
-      });
-    }
-
     const bannerIds = Array.from(new Set(publicationRows.map((r) => r.bannerId)));
 
-    const bannerRows = await db
-      .select()
-      .from(banners)
-      .where(inArray(banners.id, bannerIds));
+    const bannerRows = bannerIds.length
+      ? await db
+          .select()
+          .from(banners)
+          .where(inArray(banners.id, bannerIds))
+      : [];
 
     const bannerById = new Map(bannerRows.map((b) => [b.id, b]));
 
@@ -318,23 +380,73 @@ export async function GET(req: NextRequest) {
        tables; LinkedIn/YouTube/Google Analytics are all rows in the
        generic social_accounts table (provider column). */
 
-    const [fbConnRows, igConnRows, allSocialAccountRows] =
+    const [fbConnRows, igConnRows, allSocialAccountRows, waConnRows, waConversationSummary, waMessageRows] =
       await Promise.all([
         db.select().from(facebookConnections).where(eq(facebookConnections.userId, userId)),
         db.select().from(instagramConnections).where(eq(instagramConnections.userId, userId)),
         db.select().from(socialAccounts).where(eq(socialAccounts.userId, userId)),
+        db
+          .select({
+            businessName: whatsappConnections.businessName,
+            businessPhoneNumber: whatsappConnections.businessPhoneNumber,
+            status: whatsappConnections.status,
+            tokenExpiresAt: whatsappConnections.tokenExpiresAt,
+          })
+          .from(whatsappConnections)
+          .where(eq(whatsappConnections.userId, userId)),
+        db
+          .select({
+            conversations: count(),
+            unread: sum(whatsappConversations.unreadCount),
+          })
+          .from(whatsappConversations)
+          .where(eq(whatsappConversations.userId, userId)),
+        db
+          .select({
+            direction: whatsappMessages.direction,
+            total: count(),
+          })
+          .from(whatsappMessages)
+          .where(eq(whatsappMessages.userId, userId))
+          .groupBy(whatsappMessages.direction),
       ]);
 
-    const fbConnection = fbConnRows[0];
-    const igConnection = igConnRows[0];
+    const fbConnection = fbConnRows.find(
+      (row) =>
+        row.status === 'active' &&
+        (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
+    );
+    const igConnection = igConnRows.find(
+      (row) =>
+        row.status === 'active' &&
+        (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
+    );
 
-    const liConnection = allSocialAccountRows.find((r) => r.provider === 'linkedin');
-    const ytConnection = allSocialAccountRows.find((r) => r.provider === 'youtube');
+    const hasUsableToken = (row: (typeof allSocialAccountRows)[number] | undefined) =>
+      Boolean(
+        row?.accessToken &&
+          (!row.expiresAt || new Date(row.expiresAt).getTime() > Date.now())
+      );
+    const liConnection = allSocialAccountRows.find(
+      (row) => row.provider === 'linkedin' && hasUsableToken(row)
+    );
+    const ytConnection = allSocialAccountRows.find(
+      (row) => row.provider === 'youtube' && hasUsableToken(row)
+    );
     const gaConnection = allSocialAccountRows.find((r) => r.provider === 'google_analytics');
+    const gbConnection = allSocialAccountRows.find(
+      (row) => row.provider === 'google_business' && hasUsableToken(row)
+    );
+    const waConnection = waConnRows.find(
+      (row) =>
+        row.status === 'active' &&
+        (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
+    );
 
     const liMetadata = parseAccountMetadata((liConnection as any)?.metadata);
     const ytMetadata = parseAccountMetadata((ytConnection as any)?.metadata);
     const gaMetadata = parseAccountMetadata((gaConnection as any)?.metadata);
+    const gbMetadata = parseAccountMetadata((gbConnection as any)?.metadata);
 
     /* Build the per-banner result shape. */
 
@@ -411,6 +523,7 @@ export async function GET(req: NextRequest) {
        since it isn't tied to a specific post. */
 
     const ytChannelId = String(ytMetadata.channelId || ytConnection?.providerAccountId || '').trim();
+    let youtubeChannelStats: Record<string, unknown> | null = null;
 
     if (ytChannelId && ytConnection?.accessToken) {
       try {
@@ -418,6 +531,7 @@ export async function GET(req: NextRequest) {
           ytChannelId,
           String(ytConnection.accessToken)
         );
+        youtubeChannelStats = ytStats;
         for (const id of bannerIds) {
           bannersOut[id].platforms.youtube = {
             ...ytStats,
@@ -426,6 +540,19 @@ export async function GET(req: NextRequest) {
         }
       } catch (error: any) {
         console.error('[Analytics] YouTube channel stats failed:', error);
+      }
+    }
+
+    let googleBusinessStats: Record<string, unknown> | null = null;
+    const googleBusinessLocationId = String(gbMetadata.locationId || '').trim();
+    if (googleBusinessLocationId && gbConnection?.accessToken) {
+      try {
+        googleBusinessStats = await fetchGoogleBusinessLocationStats(
+          googleBusinessLocationId,
+          String(gbConnection.accessToken)
+        );
+      } catch (error: any) {
+        console.error('[Analytics] Google Business performance failed:', error);
       }
     }
 
@@ -450,9 +577,129 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    const bannerResults = Object.values(bannersOut);
+    const publicationCount = (platform: string) =>
+      publicationRows.filter((row) => row.platform === platform).length;
+    const sumMetric = (platform: string, metric: string): number | null => {
+      let found = false;
+      let total = 0;
+
+      for (const banner of bannerResults) {
+        const value = banner.platforms?.[platform]?.[metric];
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          found = true;
+          total += value;
+        }
+      }
+
+      return found ? total : null;
+    };
+    const insightError = (platform: string) => {
+      for (const banner of bannerResults) {
+        const message = banner.platforms?.[platform]?.error;
+        if (typeof message === 'string' && message.trim()) return message;
+      }
+      return null;
+    };
+    const whatsappMessagesByDirection = Object.fromEntries(
+      waMessageRows.map((row) => [String(row.direction).toLowerCase(), Number(row.total) || 0])
+    );
+    const whatsappConversation = waConversationSummary[0];
+
     return NextResponse.json({
       success: true,
-      banners: Object.values(bannersOut),
+      message: publicationRows.length === 0
+        ? 'No published banners found for this user yet'
+        : undefined,
+      banners: bannerResults,
+      platforms: {
+        facebook: {
+          connected: Boolean(fbConnection),
+          accountName: fbConnection?.pageName || null,
+          posts: publicationCount('facebook'),
+          impressions: sumMetric('facebook', 'impressions'),
+          reach: sumMetric('facebook', 'reach'),
+          clicks: sumMetric('facebook', 'clicks'),
+          note: !fbConnection
+            ? undefined
+            : publicationCount('facebook') === 0
+              ? 'Publish a Facebook post from AarnexAi to start tracking post insights.'
+              : insightError('facebook') || undefined,
+        },
+        instagram: {
+          connected: Boolean(igConnection),
+          accountName: igConnection?.instagramUsername || igConnection?.instagramName || null,
+          posts: publicationCount('instagram'),
+          impressions: sumMetric('instagram', 'impressions'),
+          reach: sumMetric('instagram', 'reach'),
+          profileVisits: sumMetric('instagram', 'profileVisits'),
+          note: !igConnection
+            ? undefined
+            : publicationCount('instagram') === 0
+              ? 'Publish an Instagram post from AarnexAi to start tracking post insights.'
+              : insightError('instagram') || undefined,
+        },
+        google_business: {
+          connected: Boolean(gbConnection?.accessToken),
+          accountName: gbConnection?.accountName || null,
+          posts: publicationCount('google_business'),
+          ...(googleBusinessStats || {
+            views: null,
+            clicks: null,
+            directions: null,
+            note: googleBusinessLocationId
+              ? 'Google Business performance metrics could not be loaded.'
+              : 'Connect a Google Business location to load profile performance.',
+          }),
+        },
+        youtube: {
+          connected: Boolean(ytConnection?.accessToken),
+          accountName: ytConnection?.accountName || null,
+          posts: publicationCount('youtube'),
+          ...(youtubeChannelStats || {
+            views: null,
+            likes: null,
+            comments: null,
+            note: ytConnection
+              ? 'YouTube Analytics could not be loaded for this channel.'
+              : 'Connect YouTube with analytics access to see channel performance.',
+          }),
+          periodDays: 30,
+        },
+        linkedin: {
+          connected: Boolean(liConnection?.accessToken),
+          accountName: liConnection?.accountName || null,
+          posts: publicationCount('linkedin'),
+          impressions: sumMetric('linkedin', 'impressions'),
+          clicks: sumMetric('linkedin', 'clicks'),
+          likes: sumMetric('linkedin', 'likes'),
+          comments: sumMetric('linkedin', 'comments'),
+          shares: sumMetric('linkedin', 'shares'),
+          note: !liConnection
+            ? undefined
+            : publicationCount('linkedin') === 0
+              ? 'Publish a LinkedIn post from AarnexAi to start tracking post insights.'
+              : insightError('linkedin') || undefined,
+        },
+        whatsapp: {
+          connected: Boolean(waConnection),
+          accountName: waConnection?.businessName || waConnection?.businessPhoneNumber || null,
+          conversations: Number(whatsappConversation?.conversations) || 0,
+          unread: Number(whatsappConversation?.unread) || 0,
+          messages: Object.values(whatsappMessagesByDirection).reduce(
+            (total, value) => total + value,
+            0
+          ),
+          incomingMessages:
+            whatsappMessagesByDirection.inbound ??
+            whatsappMessagesByDirection.incoming ??
+            0,
+          outgoingMessages:
+            whatsappMessagesByDirection.outbound ??
+            whatsappMessagesByDirection.outgoing ??
+            0,
+        },
+      },
     });
 
   } catch (error: any) {

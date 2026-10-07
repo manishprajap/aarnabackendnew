@@ -240,6 +240,28 @@ export async function POST(req: NextRequest) {
     const endDate = addDays(startDate, PLAN_LENGTH - 1);
     const replace = body.replace === true;
 
+    step = 'checkActivePlan';
+    const latestPlan = rowsOf(
+      await db.execute(sql`
+        SELECT end_date
+        FROM customer_marketing_plans
+        WHERE customer_id = ${userId}
+        ORDER BY start_date DESC, id DESC
+        LIMIT 1
+      `)
+    )[0] as Row | undefined;
+    const latestEndDate = latestPlan?.end_date instanceof Date
+      ? latestPlan.end_date.toISOString().slice(0, 10)
+      : String(latestPlan?.end_date || '').slice(0, 10);
+
+    if (latestEndDate && latestEndDate >= today) {
+      throw new HttpError(
+        409,
+        `Your 30-day prompt plan is active until ${latestEndDate}. You can generate a new plan after it ends.`,
+        { endDate: latestEndDate }
+      );
+    }
+
     /* ---------- load profile ---------- */
     step = 'loadProfile';
     const user = rowsOf(

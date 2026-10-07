@@ -645,18 +645,38 @@ async function sendWhatsappTemplateImage(params: {
 async function publishToWhatsappContacts(params: {
   phoneNumberId: string;
   accessToken: string;
+  businessPhoneNumber: string;
   imageUrl: string;
   caption: string;
   contacts: { phoneNumber: string; name: string | null }[];
 }) {
 
-  const { phoneNumberId, accessToken, imageUrl, caption, contacts } = params;
+  const {
+    phoneNumberId,
+    accessToken,
+    businessPhoneNumber,
+    imageUrl,
+    caption,
+    contacts,
+  } = params;
 
   const sent: string[] = [];
   const sentViaTemplate: string[] = [];
   const failed: { phoneNumber: string; error: string }[] = [];
 
   for (const contact of contacts) {
+    if (
+      normalizeWhatsappNumber(contact.phoneNumber) ===
+      normalizeWhatsappNumber(businessPhoneNumber)
+    ) {
+      failed.push({
+        phoneNumber: contact.phoneNumber,
+        error:
+          'This is your own WhatsApp Business number and cannot receive broadcasts from itself. Remove it from your contacts and add customer numbers.',
+      });
+      continue;
+    }
+
     try {
       await sendWhatsappImage({
         phoneNumberId,
@@ -1808,6 +1828,9 @@ export async function POST(req: NextRequest) {
               await publishToWhatsappContacts({
                 phoneNumberId,
                 accessToken,
+                businessPhoneNumber: String(
+                  connection.businessPhoneNumber || ''
+                ),
                 imageUrl: originalImageUrl,
                 caption,
                 contacts: contactRows,

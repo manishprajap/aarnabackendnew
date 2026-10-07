@@ -5,10 +5,15 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { db } from '@/db';
-import { whatsappConnections } from '@/db/schema';
+import {
+  whatsappConnections,
+  whatsappContacts,
+  whatsappConversations,
+  whatsappMessages,
+} from '@/db/schema';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -111,12 +116,13 @@ export async function POST(request: NextRequest) {
 
     const body = JSON.parse(rawBody);
 
-    console.log('[WhatsApp Webhook] Incoming event:', JSON.stringify(body));
-
     if (body.object !== 'whatsapp_business_account') {
       console.warn('[WhatsApp Webhook] Unknown object:', body.object);
       return NextResponse.json({ success: false, message: 'Unknown webhook object' }, { status: 400 });
     }
+    console.log('[WhatsApp Webhook] Accepted business-account event:', {
+      entryCount: Array.isArray(body.entry) ? body.entry.length : 0,
+    });
 
     for (const entry of body.entry || []) {
       const wabaId: string | undefined = entry.id;
@@ -190,25 +196,214 @@ export async function POST(request: NextRequest) {
 
           console.log('[WhatsApp Webhook] Messages for:', { phoneNumberId, displayPhoneNumber });
 
-          for (const message of value?.messages || []) {
-            console.log('[WhatsApp Webhook] Message:', {
-              from: message.from,
-              id: message.id,
-              type: message.type,
-              text: message.type === 'text' ? message.text?.body || '' : undefined,
-            });
+          const [connection] = phoneNumberId
+            ? await db
+                .select({ userId: whatsappConnections.userId })
+                .from(whatsappConnections)
+                .where(
+                  and(
+                    eq(whatsappConnections.phoneNumberId, String(phoneNumberId)),
+                    eq(whatsappConnections.status, 'active')
+                  )
+                )
+                .limit(1)
+            : [];
 
-            // TODO: incoming message DB me save karo
+          if (!connection) {
+            console.warn(
+              '[WhatsApp Webhook] No active account matches incoming phone number ID:',
+              phoneNumberId
+            );
+          }
+
+          for (const message of value?.messages || []) {
+            if (!connection) continue;
+
+            const waMessageId = String(message?.id || '').trim();
+            const sender = String(message?.from || '').replace(/\D/g, '');
+            if (!waMessageId || !sender) {
+              console.warn('[WhatsApp Webhook] Ignoring message without id or sender');
+              continue;
+            }
+
+            const [alreadyStored] = await db
+              .select({ id: whatsappMessages.id })
+              .from(whatsappMessages)
+              .where(
+                and(
+                  eq(whatsappMessages.userId, connection.userId),
+                  eq(whatsappMessages.waMessageId, waMessageId)
+                )
+              )
+              .limit(1);
+            if (alreadyStored) continue;
+
+            const contactInfo = (value?.contacts || []).find(
+              (item: any) => String(item?.wa_id || '').replace(/\D/g, '') === sender
+            );
+            const profileName = String(contactInfo?.profile?.name || '').trim() || null;
+            const [existingContact] = await db
+              .select({
+                id: whatsappContacts.id,
+                profileName: whatsappContacts.profileName,
+              })
+              .from(whatsappContacts)
+              .where(
+                and(
+                  eq(whatsappContacts.userId, connection.userId),
+                  eq(whatsappContacts.phoneNumber, sender)
+                )
+              )
+              .limit(1);
+
+            let contactId = existingContact?.id;
+            if (existingContact) {
+              await db
+                .update(whatsappContacts)
+                .set({
+                  ...(profileName && !existingContact.profileName ? { profileName } : {}),
+                  waId: sender,
+                  lastSeenAt: new Date(),
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(whatsappContacts.id, existingContact.id),
+                    eq(whatsappContacts.userId, connection.userId)
+                  )
+                );
+            } else {
+              const [createdContact] = await db
+                .insert(whatsappContacts)
+                .values({
+                  userId: connection.userId,
+                  waId: sender,
+                  phoneNumber: sender,
+                  name: profileName,
+                  profileName,
+                  isActive: true,
+                  lastSeenAt: new Date(),
+                  metadata: { source: 'whatsapp_webhook' },
+                })
+                .$returningId();
+              contactId = createdContact?.id;
+            }
+
+            if (!contactId) {
+              console.error('[WhatsApp Webhook] Failed to resolve contact for incoming message');
+              continue;
+            }
+
+            const messageType = String(message?.type || 'unknown').slice(0, 50);
+            const text =
+              messageType === 'text'
+                ? String(message?.text?.body || '')
+                : String(
+                    message?.[messageType]?.caption ||
+                      message?.interactive?.button_reply?.title ||
+                      message?.interactive?.list_reply?.title ||
+                      ''
+                  );
+            const mediaId = message?.[messageType]?.id
+              ? String(message[messageType].id)
+              : null;
+            const timestampSeconds = Number(message?.timestamp);
+            const messageDate = Number.isFinite(timestampSeconds) && timestampSeconds > 0
+              ? new Date(timestampSeconds * 1000)
+              : new Date();
+
+            const [existingConversation] = await db
+              .select({ id: whatsappConversations.id })
+              .from(whatsappConversations)
+              .where(
+                and(
+                  eq(whatsappConversations.userId, connection.userId),
+                  eq(whatsappConversations.contactId, contactId)
+                )
+              )
+              .limit(1);
+
+            let conversationId = existingConversation?.id;
+            if (existingConversation) {
+              await db
+                .update(whatsappConversations)
+                .set({
+                  lastMessageText: text || `[${messageType}]`,
+                  lastMessageAt: messageDate,
+                  unreadCount: sql`${whatsappConversations.unreadCount} + 1`,
+                  status: 'open',
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(whatsappConversations.id, existingConversation.id),
+                    eq(whatsappConversations.userId, connection.userId)
+                  )
+                );
+            } else {
+              const [createdConversation] = await db
+                .insert(whatsappConversations)
+                .values({
+                  userId: connection.userId,
+                  contactId,
+                  phoneNumberId: String(phoneNumberId),
+                  status: 'open',
+                  lastMessageText: text || `[${messageType}]`,
+                  lastMessageAt: messageDate,
+                  unreadCount: 1,
+                  createdAt: messageDate,
+                  updatedAt: new Date(),
+                })
+                .$returningId();
+              conversationId = createdConversation?.id;
+            }
+
+            if (!conversationId) {
+              console.error('[WhatsApp Webhook] Failed to resolve conversation for incoming message');
+              continue;
+            }
+
+            await db.insert(whatsappMessages).values({
+              conversationId,
+              userId: connection.userId,
+              waMessageId,
+              direction: 'inbound',
+              type: messageType,
+              text: text || null,
+              status: 'received',
+              createdAt: messageDate,
+              metadata: {
+                ...(mediaId ? { mediaId } : {}),
+                ...(message?.context?.id ? { contextMessageId: String(message.context.id) } : {}),
+              },
+            });
           }
 
           for (const status of value?.statuses || []) {
-            console.log('[WhatsApp Webhook] Status:', {
-              id: status.id,
-              status: status.status,
-              recipient: status.recipient_id,
-            });
+            if (!connection || !status?.id) continue;
+            const statusName = String(status.status || '').toLowerCase();
+            if (!['sent', 'delivered', 'read', 'failed'].includes(statusName)) continue;
 
-            // TODO: message status DB me update karo
+            const statusDate = Number(status.timestamp)
+              ? new Date(Number(status.timestamp) * 1000)
+              : new Date();
+            await db
+              .update(whatsappMessages)
+              .set({
+                status: statusName,
+                ...(statusName === 'sent' ? { sentAt: statusDate } : {}),
+                ...(statusName === 'delivered' ? { deliveredAt: statusDate } : {}),
+                ...(statusName === 'read' ? { readAt: statusDate } : {}),
+                ...(statusName === 'failed'
+                  ? { errorMessage: String(status?.errors?.[0]?.title || 'Message delivery failed') }
+                  : {}),
+              })
+              .where(
+                and(
+                  eq(whatsappMessages.userId, connection.userId),
+                  eq(whatsappMessages.waMessageId, String(status.id))
+                )
+              );
           }
         }
       }
