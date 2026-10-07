@@ -37,23 +37,31 @@ export async function POST(req: NextRequest) {
     const userId = getUserIdFromRequest(req);
 
     const body = await req.json().catch(() => ({}));
-    const callbackUrl = String(body?.callbackUrl || '');
+    const callbackScheme = String(body?.callbackUrl || '');
 
-    if (callbackUrl !== APP_CALLBACK_URL) {
+    if (callbackScheme !== APP_CALLBACK_URL) {
       return json(origin, { success: false, message: 'Invalid WhatsApp callback URL' }, 400);
     }
 
     // Signed, 10-minute session containing userId
     const sessionId = createWhatsAppSession(userId);
 
-    // NEXT_PUBLIC_APP_URL optional hai — sirf tab callbackHttpsUrl banao jab set ho,
-    // warna missing env poora connect flow block kar deta tha.
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, '');
-    const callbackHttpsUrl = appUrl
-      ? `${appUrl}/api/whatsapp/callback?session=${encodeURIComponent(sessionId)}`
-      : undefined;
+    // Preserve any deployment prefix (for example /aarnexai-backend) from
+    // the incoming API URL when constructing the HTTPS callback URL.
+    const callbackHttpsUrl = new URL(req.url);
+    const callbackPath = callbackHttpsUrl.pathname.replace(/\/session\/?$/, '/callback');
+    if (callbackPath === callbackHttpsUrl.pathname) {
+      throw new Error('Unable to construct WhatsApp callback URL from request path');
+    }
+    callbackHttpsUrl.pathname = callbackPath;
+    callbackHttpsUrl.search = '';
+    callbackHttpsUrl.searchParams.set('session', sessionId);
 
-    return json(origin, { success: true, sessionId, callbackHttpsUrl });
+    return json(origin, {
+      success: true,
+      sessionId,
+      callbackHttpsUrl: callbackHttpsUrl.toString(),
+    });
   } catch (error) {
     if (error instanceof AuthError) {
       return json(origin, { success: false, message: error.message }, 401);

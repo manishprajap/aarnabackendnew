@@ -32,10 +32,9 @@
 
       <div id="afterConnect" class="hidden">
         <p>
-          After you finish connecting on the Meta page, come back here and tap
-          the button below to return to the app.
+          After completing the WhatsApp setup on Meta, tap below to return to AarnexAi.
         </p>
-        <button id="doneBtn" class="secondary" type="button">I've connected — Return to app</button>
+        <button id="doneBtn" class="secondary" type="button">Return to AarnexAi</button>
       </div>
 
       <div id="status" class="status"></div>
@@ -48,6 +47,7 @@
       const sessionId = params.get('session');
       const appId = params.get('app_id');
       const configId = params.get('config_id');
+      const callbackUrl = params.get('callback_url');
 
       const connectBtn = document.getElementById('connectBtn');
       const doneBtn = document.getElementById('doneBtn');
@@ -59,15 +59,19 @@
         status.textContent = message;
       }
 
-      function redirectToApp(statusValue, message) {
-        const callback = new URL('aarnamarket://whatsapp-callback');
-        callback.searchParams.set('session', sessionId || '');
-        callback.searchParams.set('status', statusValue);
-        if (message) callback.searchParams.set('message', message);
+      function returnToApp() {
+        const callback = new URL(callbackUrl);
+        if (
+          callback.origin !== window.location.origin ||
+          !callback.pathname.endsWith('/api/whatsapp/callback')
+        ) {
+          throw new Error('Invalid app callback URL.');
+        }
+        callback.searchParams.set('session', sessionId);
         window.location.href = callback.toString();
       }
 
-      if (!sessionId || !appId || !configId) {
+      if (!sessionId || !appId || !configId || !callbackUrl) {
         connectBtn.disabled = true;
         setStatus('Invalid WhatsApp connection link.', 'error');
         return;
@@ -90,9 +94,11 @@
 
       doneBtn.addEventListener('click', function () {
         setStatus('Returning to the app\u2026', 'success');
-        setTimeout(function () {
-          redirectToApp('pending', 'Awaiting webhook confirmation.');
-        }, 400);
+        try {
+          returnToApp();
+        } catch (error) {
+          setStatus(error.message || 'Could not return to the app.', 'error');
+        }
       });
     })();
   </script>

@@ -16,6 +16,7 @@ import { db } from '@/db';
 import { whatsappConnections } from '@/db/schema';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
+import { verifyWhatsAppSession } from '@/lib/whatsappSession';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -140,6 +141,40 @@ export async function POST(req: NextRequest) {
     const userId = Number(getUserIdFromRequest(req));
     if (!Number.isFinite(userId)) {
       return reply(origin, { success: false, state: 'error', step: 'auth', message: 'Invalid user' }, 401);
+    }
+
+    const body = await req.json().catch(() => ({}));
+    const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+    if (!sessionId) {
+      return reply(
+        origin,
+        { success: false, state: 'error', step: 'session', message: 'WhatsApp connection session is required' },
+        400
+      );
+    }
+
+    let session: ReturnType<typeof verifyWhatsAppSession>;
+    try {
+      session = verifyWhatsAppSession(sessionId);
+    } catch (error) {
+      return reply(
+        origin,
+        {
+          success: false,
+          state: 'error',
+          step: 'session',
+          message: error instanceof Error ? error.message : 'Invalid WhatsApp connection session',
+        },
+        401
+      );
+    }
+
+    if (Number(session.userId) !== userId) {
+      return reply(
+        origin,
+        { success: false, state: 'error', step: 'session', message: 'WhatsApp session does not belong to this user' },
+        403
+      );
     }
 
     const businessId = process.env.META_BUSINESS_ID?.trim();

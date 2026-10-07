@@ -32,7 +32,6 @@ const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
 const FB_GRAPH_API_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 const IG_GRAPH_API_BASE = `https://graph.instagram.com/${META_GRAPH_VERSION}`;
 const LINKEDIN_API_BASE = 'https://api.linkedin.com/v2';
-const YOUTUBE_ANALYTICS_API_BASE = 'https://youtubeanalytics.googleapis.com/v2';
 const GA4_DATA_API_BASE = 'https://analyticsdata.googleapis.com/v1beta';
 const GOOGLE_BUSINESS_PERFORMANCE_API_BASE =
   'https://businessprofileperformance.googleapis.com/v1';
@@ -245,36 +244,6 @@ async function fetchGoogleBusinessLocationStats(
   };
 }
 
-async function fetchYoutubeChannelStats(channelId: string, accessToken: string) {
-  const { startDate, endDate } = dateRange(30);
-
-  const url =
-    `${YOUTUBE_ANALYTICS_API_BASE}/reports` +
-    `?ids=${encodeURIComponent(`channel==${channelId}`)}` +
-    `&startDate=${startDate}&endDate=${endDate}` +
-    `&metrics=views,likes,comments`;
-
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    cache: 'no-store',
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'YouTube Analytics request failed'));
-  }
-
-  const row: number[] = data?.rows?.[0] || [0, 0, 0];
-
-  return {
-    views: row[0] || 0,
-    likes: row[1] || 0,
-    comments: row[2] || 0,
-    period: { startDate, endDate },
-  };
-}
-
 /* =========================================================
    GOOGLE ANALYTICS (GA4) — pageviews/clicks for a banner's
    landing page.
@@ -475,7 +444,6 @@ export async function GET(req: NextRequest) {
     );
 
     const liMetadata = parseAccountMetadata((liConnection as any)?.metadata);
-    const ytMetadata = parseAccountMetadata((ytConnection as any)?.metadata);
     const gaMetadata = parseAccountMetadata((gaConnection as any)?.metadata);
     const gbMetadata = parseAccountMetadata((gbConnection as any)?.metadata);
 
@@ -550,30 +518,6 @@ export async function GET(req: NextRequest) {
         target.platforms[row.platform] = {
           error: error?.message || `${row.platform} insights request failed`,
         };
-      }
-    }
-
-    /* YOUTUBE — channel-level, attached to every banner for visibility
-       since it isn't tied to a specific post. */
-
-    const ytChannelId = String(ytMetadata.channelId || ytConnection?.providerAccountId || '').trim();
-    let youtubeChannelStats: Record<string, unknown> | null = null;
-
-    if (ytChannelId && ytConnection?.accessToken) {
-      try {
-        const ytStats = await fetchYoutubeChannelStats(
-          ytChannelId,
-          String(ytConnection.accessToken)
-        );
-        youtubeChannelStats = ytStats;
-        for (const id of bannerIds) {
-          bannersOut[id].platforms.youtube = {
-            ...ytStats,
-            note: 'Channel-level stats — YouTube has no per-banner post to measure.',
-          };
-        }
-      } catch (error: any) {
-        console.error('[Analytics] YouTube channel stats failed:', error);
       }
     }
 
@@ -692,15 +636,10 @@ export async function GET(req: NextRequest) {
           connected: Boolean(ytConnection?.accessToken),
           accountName: ytConnection?.accountName || null,
           posts: publicationCount('youtube'),
-          ...(youtubeChannelStats || {
-            views: null,
-            likes: null,
-            comments: null,
-            note: ytConnection
-              ? 'YouTube Analytics could not be loaded for this channel.'
-              : 'Connect YouTube with analytics access to see channel performance.',
-          }),
-          periodDays: 30,
+          views: null,
+          likes: null,
+          comments: null,
+          note: 'YouTube Analytics is temporarily disabled.',
         },
         linkedin: {
           connected: Boolean(liConnection?.accessToken),
