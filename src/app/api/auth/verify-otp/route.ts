@@ -77,6 +77,12 @@ export async function POST(req: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
+    if (user.status !== 'ACTIVE') {
+      return NextResponse.json(
+        { error: 'This account is inactive. Please contact the platform administrator.' },
+        { status: 403 }
+      );
+    }
 
     if (deviceId || deviceType || deviceName) {
       await db

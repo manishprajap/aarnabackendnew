@@ -9,6 +9,17 @@ interface Counts {
   presets: number;
 }
 
+interface Overview {
+  vendors: number;
+  activeVendors: number;
+  suspendedVendors: number;
+  products: number;
+  banners: number;
+  subscriptions: number;
+  paidTransactions: number;
+  grossRevenuePaise: number;
+}
+
 type CountKey = keyof Counts;
 
 function CategoryIcon() {
@@ -89,6 +100,7 @@ const INVENTORY: {
 
 const AdminDashboardPage: React.FC = () => {
   const [counts, setCounts] = useState<Counts | null>(null);
+  const [overview, setOverview] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
@@ -106,17 +118,18 @@ const AdminDashboardPage: React.FC = () => {
           fetch(`${API_URL}/categories`, { cache: 'no-store' }),
           fetch(`${API_URL}/subcategories`, { cache: 'no-store' }),
           fetch(`${API_URL}/presets`, { cache: 'no-store' }),
+          fetch(`${API_URL}/admin/overview`, { cache: 'no-store', credentials: 'include' }),
         ]);
 
         if (responses.some((response) => !response.ok)) {
           throw new Error('Could not load all dashboard data. Refresh to try again.');
         }
 
-        const [categoryData, subcategoryData, presetData] = await Promise.all(
+        const [categoryData, subcategoryData, presetData, overviewData] = await Promise.all(
           responses.map((response) => response.json())
         );
 
-        if (!categoryData.success || !subcategoryData.success || !presetData.success) {
+        if (!categoryData.success || !subcategoryData.success || !presetData.success || !overviewData.success) {
           throw new Error('Could not load all dashboard data. Refresh to try again.');
         }
 
@@ -126,6 +139,7 @@ const AdminDashboardPage: React.FC = () => {
             subcategories: subcategoryData.subcategories?.length ?? 0,
             presets: presetData.presets?.length ?? 0,
           });
+          setOverview(overviewData.overview);
           setUpdatedAt(new Date());
         }
       } catch (error) {
@@ -239,6 +253,28 @@ const AdminDashboardPage: React.FC = () => {
               <p className="mt-4 text-3xl font-semibold tabular-nums text-slate-950">
                 {loading ? '—' : counts?.[item.key] ?? '—'}
               </p>
+              <p className="mt-1 text-xs text-slate-500">{item.detail}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section aria-labelledby="operations-title">
+        <div className="mb-4">
+          <h2 id="operations-title" className="text-lg font-semibold text-slate-950">Marketplace operations</h2>
+          <p className="mt-1 text-sm text-slate-500">Live account, catalog and payment totals from the backend.</p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          {[
+            { label: 'Vendors', value: overview?.vendors, detail: `${overview?.activeVendors ?? '—'} active · ${overview?.suspendedVendors ?? '—'} suspended` },
+            { label: 'Products', value: overview?.products, detail: 'Across all vendor accounts' },
+            { label: 'Banners', value: overview?.banners, detail: 'Generated marketplace content' },
+            { label: 'Subscriptions', value: overview?.subscriptions, detail: 'Current and past plan records' },
+            { label: 'Paid revenue', value: overview ? `₹${(overview.grossRevenuePaise / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : '—', detail: `${overview?.paidTransactions ?? '—'} successful transactions` },
+          ].map((item) => (
+            <div key={item.label} className="rounded-lg border border-slate-200 bg-white p-4">
+              <p className="text-sm font-medium text-slate-500">{item.label}</p>
+              <p className="mt-3 text-2xl font-semibold tabular-nums text-slate-950">{loading ? '—' : item.value ?? '—'}</p>
               <p className="mt-1 text-xs text-slate-500">{item.detail}</p>
             </div>
           ))}

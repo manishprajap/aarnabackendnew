@@ -46,6 +46,15 @@ function PromptIcon() {
   );
 }
 
+function VendorsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="9" cy="8" r="3" />
+      <path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 5.5a3 3 0 0 1 0 5.8M17 14a5 5 0 0 1 3.5 4.8" />
+    </svg>
+  );
+}
+
 function LogoutIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -60,6 +69,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Categories', href: '/admin/manage?tab=category', icon: <CategoryIcon /> },
   { label: 'Subcategories', href: '/admin/manage?tab=subcategory', icon: <SubcategoryIcon /> },
   { label: 'Prompts', href: '/admin/manage?tab=preset', icon: <PromptIcon /> },
+  { label: 'Vendors', href: '/admin/vendors', icon: <VendorsIcon /> },
 ];
 
 /*

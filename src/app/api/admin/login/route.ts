@@ -1,4 +1,6 @@
+import crypto from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createSessionToken, SESSION_COOKIE_NAME } from '@/lib/adminAuth';
 
 /*
@@ -9,17 +11,21 @@ import { createSessionToken, SESSION_COOKIE_NAME } from '@/lib/adminAuth';
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => null);
+    const parsed = z.object({
+      email: z.string().trim().email().max(191),
+      password: z.string().min(1).max(1024),
+    }).safeParse(body);
 
-    const { email, password } = body;
-
-    if (!email || !password) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { success: false, message: 'Email and password are required' },
-        { status: 400 }
+        { success: false, message: 'Enter a valid admin email and password.' },
+        { status: 400 },
       );
     }
 
+    const email = parsed.data.email.toLowerCase();
+    const password = parsed.data.password;
     const adminEmail = process.env.ADMIN_EMAIL;
     const adminPassword = process.env.ADMIN_PASSWORD;
 
@@ -30,7 +36,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (email !== adminEmail || password !== adminPassword) {
+    const digest = (value: string) => crypto.createHash('sha256').update(value).digest();
+    const emailMatches = crypto.timingSafeEqual(
+      digest(email),
+      digest(adminEmail.trim().toLowerCase())
+    );
+    const passwordMatches = crypto.timingSafeEqual(
+      digest(password),
+      digest(adminPassword)
+    );
+    if (!emailMatches || !passwordMatches) {
       return NextResponse.json(
         { success: false, message: 'Invalid email or password' },
         { status: 401 }
@@ -51,10 +66,10 @@ export async function POST(req: NextRequest) {
 
     return response;
   } catch (error: any) {
-    console.error('ADMIN LOGIN ERROR:', error);
+    console.error('[Admin Login] Login request failed:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Login failed' },
+      { success: false, message: 'Admin login failed. Please try again.' },
       { status: 500 }
     );
   }

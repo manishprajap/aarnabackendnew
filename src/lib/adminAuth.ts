@@ -65,13 +65,20 @@ export function verifySessionToken(token: string | undefined): boolean {
 
   try {
     const decoded = Buffer.from(payload, 'base64').toString('utf-8');
+    const separator = decoded.lastIndexOf('.');
+    const expiry = Number.parseInt(decoded.slice(separator + 1), 10);
 
-    const [, expiryStr] = decoded.split('.');
-
-    const expiry = parseInt(expiryStr, 10);
-
-    return Date.now() < expiry;
+    return separator > 0 && Number.isFinite(expiry) && Date.now() < expiry;
   } catch {
+    return false;
+  }
+}
+
+export function hasValidAdminSession(token: string | undefined): boolean {
+  try {
+    return verifySessionToken(token);
+  } catch (error) {
+    console.error('[Admin Auth] Session verification failed:', error);
     return false;
   }
 }

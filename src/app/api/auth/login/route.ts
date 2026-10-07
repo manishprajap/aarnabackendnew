@@ -46,6 +46,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (user.status !== 'ACTIVE') {
+      return NextResponse.json(
+        { error: 'This account is inactive. Please contact the platform administrator.' },
+        { status: 403, headers: corsHeaders(origin) }
+      );
+    }
+
     // A user created via OTP signup may not have a password set yet.
     if (!user.password) {
       return NextResponse.json(

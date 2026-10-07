@@ -43,6 +43,13 @@ export async function POST(req: NextRequest) {
       .where(eq(users.mobile, mobile))
       .limit(1);
 
+    if (existingUser && existingUser.status !== 'ACTIVE') {
+      return NextResponse.json(
+        { error: 'This account is inactive. Please contact the platform administrator.' },
+        { status: 403 }
+      );
+    }
+
     let userId: number;
     const isNewUser = !existingUser;
 
