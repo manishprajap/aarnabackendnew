@@ -59,7 +59,11 @@ export async function POST(req: NextRequest) {
     params.set("redirect_uri", redirectUri);
     params.set(
       "scope",
-      ["instagram_business_basic", "instagram_business_content_publish"].join(
+      [
+        "instagram_business_basic",
+        "instagram_business_content_publish",
+        "instagram_business_manage_insights",
+      ].join(
         ","
       )
     );

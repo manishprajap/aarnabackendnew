@@ -77,23 +77,48 @@ async function fetchFacebookPostInsights(postId: string, accessToken: string) {
     `?metric=post_impressions,post_impressions_unique,post_clicks` +
     `&access_token=${encodeURIComponent(accessToken)}`;
 
-  const response = await fetch(url, { cache: 'no-store' });
-  const data = await response.json();
+  const metrics: Record<string, number | string> = {};
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(getErrorMessage(data, 'Facebook insights request failed'));
+    }
 
-  if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'Facebook insights request failed'));
+    const byName: Record<string, number> = {};
+    for (const metric of data?.data || []) {
+      byName[metric.name] = metric.values?.[0]?.value ?? 0;
+    }
+    metrics.impressions = byName.post_impressions || 0;
+    metrics.reach = byName.post_impressions_unique || 0;
+    metrics.clicks = byName.post_clicks || 0;
+  } catch (error) {
+    console.warn(`[Analytics] Facebook impressions unavailable for ${postId}:`, error);
+    metrics.insightsNote = 'Facebook reach/impressions are unavailable for this post.';
   }
 
-  const byName: Record<string, number> = {};
-  for (const metric of data?.data || []) {
-    byName[metric.name] = metric.values?.[0]?.value ?? 0;
-  }
+  try {
+    const postUrl = new URL(`${FB_GRAPH_API_BASE}/${encodeURIComponent(postId)}`);
+    postUrl.searchParams.set('fields', 'likes.summary(true),comments.summary(true)');
+    postUrl.searchParams.set('access_token', accessToken);
+    const postResponse = await fetch(postUrl.toString(), { cache: 'no-store' });
+    const postData = await postResponse.json();
 
-  return {
-    impressions: byName.post_impressions || 0,
-    reach: byName.post_impressions_unique || 0,
-    clicks: byName.post_clicks || 0,
-  };
+    if (!postResponse.ok) {
+      throw new Error(getErrorMessage(postData, 'Facebook engagement request failed'));
+    }
+
+    const engagement: Record<string, number> = {};
+    const likeCount = postData?.likes?.summary?.total_count;
+    const commentCount = postData?.comments?.summary?.total_count;
+    if (Number.isFinite(Number(likeCount))) engagement.likes = Number(likeCount);
+    if (Number.isFinite(Number(commentCount))) engagement.comments = Number(commentCount);
+    return { ...metrics, ...engagement };
+  } catch (error) {
+    console.warn(`[Analytics] Facebook likes/comments unavailable for ${postId}:`, error);
+    metrics.engagementNote = 'Facebook likes/comments are unavailable for this post.';
+    return metrics;
+  }
 }
 
 /* =========================================================
@@ -135,6 +160,133 @@ async function fetchInstagramMediaInsights(mediaId: string, accessToken: string)
     reach: byName.reach || 0,
     profileVisits: byName.profile_visits || 0,
   };
+}
+
+async function fetchInstagramEngagement(mediaId: string, accessToken: string) {
+  const url = new URL(`${IG_GRAPH_API_BASE}/${encodeURIComponent(mediaId)}`);
+  url.searchParams.set('fields', 'like_count,comments_count');
+  url.searchParams.set('access_token', accessToken);
+
+  const response = await fetch(url.toString(), { cache: 'no-store' });
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(getErrorMessage(data, 'Instagram engagement request failed'));
+  }
+
+  return {
+    ...(Number.isFinite(Number(data?.like_count))
+      ? { likes: Number(data.like_count) }
+      : {}),
+    ...(Number.isFinite(Number(data?.comments_count))
+      ? { comments: Number(data.comments_count) }
+      : {}),
+  };
+}
+
+async function fetchGoogleAccessToken(refreshToken: string): Promise<string> {
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID || '',
+      client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+    cache: 'no-store',
+  });
+  const data = await response.json();
+
+  if (!response.ok || !data.access_token) {
+    throw new Error(getErrorMessage(data, 'YouTube access token refresh failed'));
+  }
+
+  return String(data.access_token);
+}
+
+async function fetchYouTubeVideos(accessToken: string, limit: number) {
+  const channelUrl = new URL('https://www.googleapis.com/youtube/v3/channels');
+  channelUrl.searchParams.set('part', 'contentDetails');
+  channelUrl.searchParams.set('mine', 'true');
+
+  const channelResponse = await fetch(channelUrl.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+  });
+  const channelData = await channelResponse.json();
+  if (!channelResponse.ok) {
+    throw new Error(getErrorMessage(channelData, 'Could not load YouTube channel uploads'));
+  }
+
+  const uploadsPlaylistId = channelData?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+  if (!uploadsPlaylistId) return [];
+
+  const playlistUrl = new URL('https://www.googleapis.com/youtube/v3/playlistItems');
+  playlistUrl.searchParams.set('part', 'snippet,contentDetails');
+  playlistUrl.searchParams.set('playlistId', String(uploadsPlaylistId));
+  playlistUrl.searchParams.set('maxResults', String(limit));
+
+  const playlistResponse = await fetch(playlistUrl.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+  });
+  const playlistData = await playlistResponse.json();
+  if (!playlistResponse.ok) {
+    throw new Error(getErrorMessage(playlistData, 'Could not load YouTube channel videos'));
+  }
+
+  const videos = (playlistData?.items || [])
+    .map((item: any) => ({
+      id: String(item?.contentDetails?.videoId || item?.snippet?.resourceId?.videoId || ''),
+      title: String(item?.snippet?.title || 'YouTube video'),
+      description: String(item?.snippet?.description || ''),
+      publishedAt: String(item?.contentDetails?.videoPublishedAt || item?.snippet?.publishedAt || ''),
+      thumbnailUrl: String(
+        item?.snippet?.thumbnails?.medium?.url ||
+        item?.snippet?.thumbnails?.default?.url ||
+        ''
+      ),
+    }))
+    .filter((item: { id: string }) => item.id);
+
+  if (!videos.length) return [];
+
+  const videosUrl = new URL('https://www.googleapis.com/youtube/v3/videos');
+  videosUrl.searchParams.set('part', 'statistics');
+  videosUrl.searchParams.set('id', videos.map((video: { id: string }) => video.id).join(','));
+
+  const statsResponse = await fetch(videosUrl.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    cache: 'no-store',
+  });
+  const statsData = await statsResponse.json();
+  if (!statsResponse.ok) {
+    throw new Error(getErrorMessage(statsData, 'Could not load YouTube video statistics'));
+  }
+
+  const statsById = new Map<string, any>(
+    (statsData?.items || []).map((item: any) => [String(item.id), item.statistics || {}])
+  );
+
+  return videos.map((video: {
+    id: string;
+    title: string;
+    description: string;
+    publishedAt: string;
+    thumbnailUrl: string;
+  }) => {
+    const stats = statsById.get(video.id) || {};
+    return {
+      ...video,
+      permalink: `https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`,
+      metrics: {
+        views: Number(stats.viewCount) || 0,
+        likes: Number(stats.likeCount) || 0,
+        comments: Number(stats.commentCount) || 0,
+      },
+    };
+  });
 }
 
 /* =========================================================
@@ -431,7 +583,7 @@ export async function GET(req: NextRequest) {
       (row) => row.provider === 'linkedin' && hasUsableToken(row)
     );
     const ytConnection = allSocialAccountRows.find(
-      (row) => row.provider === 'youtube' && hasUsableToken(row)
+      (row) => row.provider === 'youtube'
     );
     const gaConnection = allSocialAccountRows.find((r) => r.provider === 'google_analytics');
     const gbConnection = allSocialAccountRows.find(
@@ -457,6 +609,26 @@ export async function GET(req: NextRequest) {
         bannerId: id,
         day: b?.day ?? null,
         theme: b?.theme ?? null,
+        caption: b?.caption ?? null,
+        imageUrl: b?.imageUrl ?? null,
+        publishedAt: publicationRows
+          .filter((row) => row.bannerId === id)
+          .reduce<Date | null>(
+            (latest, row) =>
+              !latest || new Date(row.publishedAt).getTime() > latest.getTime()
+                ? new Date(row.publishedAt)
+                : latest,
+            null
+          ),
+        publications: publicationRows
+          .filter((row) => row.bannerId === id)
+          .map((row) => ({
+            id: row.id,
+            platform: row.platform,
+            externalId: row.externalId,
+            permalink: row.permalink,
+            publishedAt: row.publishedAt,
+          })),
         platforms: {},
       };
     }
@@ -482,10 +654,29 @@ export async function GET(req: NextRequest) {
         }
 
         if (row.platform === 'instagram' && igConnection) {
-          target.platforms.instagram = await fetchInstagramMediaInsights(
-            row.externalId,
-            String(igConnection.accessToken || '')
-          );
+          const instagramMetrics: Record<string, number | string> = {};
+          const instagramToken = String(igConnection.accessToken || '');
+          try {
+            Object.assign(
+              instagramMetrics,
+              await fetchInstagramMediaInsights(row.externalId, instagramToken)
+            );
+          } catch (error) {
+            console.warn(`[Analytics] Instagram views unavailable for ${row.externalId}:`, error);
+            instagramMetrics.insightsNote = 'Instagram views/reach are unavailable for this post.';
+          }
+
+          let engagement: Record<string, number | string> = {};
+          try {
+            engagement = await fetchInstagramEngagement(
+              row.externalId,
+              instagramToken
+            );
+          } catch (error) {
+            console.warn(`[Analytics] Instagram likes/comments unavailable for ${row.externalId}:`, error);
+            engagement.engagementNote = 'Instagram likes/comments are unavailable for this post.';
+          }
+          target.platforms.instagram = { ...instagramMetrics, ...engagement };
         }
 
         if (row.platform === 'linkedin' && liConnection) {
@@ -583,6 +774,27 @@ export async function GET(req: NextRequest) {
       waMessageRows.map((row) => [String(row.direction).toLowerCase(), Number(row.total) || 0])
     );
     const whatsappConversation = waConversationSummary[0];
+    let youtubeVideos: Awaited<ReturnType<typeof fetchYouTubeVideos>> = [];
+    let youtubeVideosNote: string | undefined;
+    if (ytConnection?.accessToken || ytConnection?.refreshToken) {
+      try {
+        const tokenExpired =
+          !ytConnection.accessToken ||
+          (ytConnection.expiresAt && new Date(ytConnection.expiresAt).getTime() <= Date.now() + 60_000);
+        let accessToken = String(ytConnection.accessToken || '');
+        if (tokenExpired) {
+          if (!ytConnection.refreshToken) {
+            throw new Error('Reconnect YouTube to grant video analytics access.');
+          }
+          accessToken = await fetchGoogleAccessToken(String(ytConnection.refreshToken));
+        }
+        youtubeVideos = await fetchYouTubeVideos(accessToken, 30);
+      } catch (error) {
+        youtubeVideosNote =
+          error instanceof Error ? error.message : 'Unable to load YouTube video insights.';
+        console.error('[Analytics] YouTube video insights failed:', error);
+      }
+    }
 
     return NextResponse.json({
       success: true,
@@ -590,6 +802,8 @@ export async function GET(req: NextRequest) {
         ? 'No published banners found for this user yet'
         : undefined,
       banners: bannerResults,
+      youtubeVideos,
+      youtubeVideosNote,
       platforms: {
         facebook: {
           connected: Boolean(fbConnection),
