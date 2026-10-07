@@ -240,6 +240,11 @@ async function refreshGoogleAccessToken(refreshToken: string): Promise<string> {
     const errorCode = typeof data?.error === 'string' ? data.error : '';
     const description =
       typeof data?.error_description === 'string' ? data.error_description : '';
+    if (/unauthorized|invalid_grant/i.test(`${errorCode} ${description}`)) {
+      throw new Error(
+        'Google rejected the YouTube refresh authorization. Reconnect YouTube and approve yt-analytics.readonly access.'
+      );
+    }
     throw new Error(
       errorCode === 'invalid_grant'
         ? 'YouTube authorization expired or was revoked. Reconnect YouTube and grant analytics access.'
@@ -266,10 +271,17 @@ async function fetchYoutubeChannelStats(accessToken: string) {
   const data = await response.json();
 
   if (!response.ok) {
+    const message = getErrorMessage(data, 'YouTube Analytics request failed');
+    const reason = String(data?.error?.errors?.[0]?.reason || '');
+    const authorizationRejected =
+      response.status === 401 ||
+      response.status === 403 ||
+      /unauthorized|invalid credentials/i.test(message) ||
+      /insufficient.*scope|insufficientpermissions/i.test(reason);
     throw new Error(
-      response.status === 401 || response.status === 403
+      authorizationRejected
         ? 'YouTube Analytics rejected the saved authorization or required scope. Reconnect YouTube and approve yt-analytics.readonly access.'
-        : getErrorMessage(data, 'YouTube Analytics request failed')
+        : message
     );
   }
 

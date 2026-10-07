@@ -37,9 +37,30 @@ const GOOGLE_BUSINESS_PERFORMANCE_API_BASE =
   'https://businessprofileperformance.googleapis.com/v1';
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
+const MEDIA_ORIGIN = process.env.NEXT_PUBLIC_MEDIA_URL || 'https://aarnexai.com';
 
 function getErrorMessage(data: any, fallback: string): string {
   return data?.error?.message || data?.error_message || data?.message || fallback;
+}
+
+function toFullMediaUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  if (/^https?:\/\//i.test(value)) return value;
+  return `${MEDIA_ORIGIN}${value.startsWith('/') ? '' : '/'}${value}`;
+}
+
+function getYouTubeAuthorizationError(status: number, data: any, fallback: string): string {
+  const message = getErrorMessage(data, fallback);
+  const reason = String(data?.error?.errors?.[0]?.reason || '');
+  if (
+    status === 401 ||
+    status === 403 ||
+    /unauthorized|invalid credentials/i.test(message) ||
+    /insufficient.*scope|insufficientpermissions/i.test(reason)
+  ) {
+    return 'YouTube rejected the saved authorization or required scope. Reconnect YouTube and approve youtube.readonly and yt-analytics.readonly access.';
+  }
+  return message;
 }
 
 function isoDate(date: Date): string {
@@ -215,6 +236,11 @@ async function fetchGoogleAccessToken(refreshToken: string): Promise<string> {
     const errorCode = typeof data?.error === 'string' ? data.error : '';
     const description =
       typeof data?.error_description === 'string' ? data.error_description : '';
+    if (/unauthorized|invalid_grant/i.test(`${errorCode} ${description}`)) {
+      throw new Error(
+        'Google rejected the YouTube refresh authorization. Reconnect YouTube and approve youtube.readonly and yt-analytics.readonly access.'
+      );
+    }
     throw new Error(
       errorCode === 'invalid_grant'
         ? 'YouTube authorization expired or was revoked. Reconnect YouTube and grant video analytics access.'
@@ -236,11 +262,7 @@ async function fetchYouTubeVideos(accessToken: string, limit: number) {
   });
   const channelData = await channelResponse.json();
   if (!channelResponse.ok) {
-    throw new Error(
-      channelResponse.status === 401 || channelResponse.status === 403
-        ? 'YouTube rejected the saved authorization or required scope. Reconnect YouTube and approve youtube.readonly access.'
-        : getErrorMessage(channelData, 'Could not load YouTube channel uploads')
-    );
+    throw new Error(getYouTubeAuthorizationError(channelResponse.status, channelData, 'Could not load YouTube channel uploads'));
   }
 
   const uploadsPlaylistId = channelData?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
@@ -257,7 +279,7 @@ async function fetchYouTubeVideos(accessToken: string, limit: number) {
   });
   const playlistData = await playlistResponse.json();
   if (!playlistResponse.ok) {
-    throw new Error(getErrorMessage(playlistData, 'Could not load YouTube channel videos'));
+    throw new Error(getYouTubeAuthorizationError(playlistResponse.status, playlistData, 'Could not load YouTube channel videos'));
   }
 
   const videos = (playlistData?.items || [])
@@ -286,7 +308,7 @@ async function fetchYouTubeVideos(accessToken: string, limit: number) {
   });
   const statsData = await statsResponse.json();
   if (!statsResponse.ok) {
-    throw new Error(getErrorMessage(statsData, 'Could not load YouTube video statistics'));
+    throw new Error(getYouTubeAuthorizationError(statsResponse.status, statsData, 'Could not load YouTube video statistics'));
   }
 
   const statsById = new Map<string, any>(
@@ -653,7 +675,7 @@ export async function GET(req: NextRequest) {
         day: b?.day ?? null,
         theme: b?.theme ?? null,
         caption: b?.caption ?? null,
-        imageUrl: b?.imageUrl ?? null,
+        imageUrl: toFullMediaUrl(b?.imageUrl ?? null),
         publishedAt: publicationRows
           .filter((row) => row.bannerId === id)
           .reduce<Date | null>(
