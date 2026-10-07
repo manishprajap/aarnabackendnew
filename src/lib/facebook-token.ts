@@ -54,16 +54,17 @@ export function encryptFacebookToken(
 export function decryptFacebookToken(
   value: string
 ): string {
-  const key = getEncryptionKey();
-
   const parts = value.split('.');
 
   if (parts.length !== 3) {
-    throw new Error(
-      'Invalid encrypted Facebook token'
-    );
+    // Older Facebook connections were stored as plaintext access tokens.
+    // Accept only the provider's legacy EAA token format; do not treat
+    // arbitrary/corrupt database values as bearer tokens.
+    if (/^EAA[A-Za-z0-9_-]{20,}$/.test(value)) return value;
+    throw new Error('Invalid encrypted Facebook token');
   }
 
+  const key = getEncryptionKey();
   const [
     ivEncoded,
     authTagEncoded,

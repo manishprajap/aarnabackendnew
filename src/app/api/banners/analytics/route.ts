@@ -26,7 +26,7 @@ import {
 import { eq, and, inArray, count, sum } from 'drizzle-orm';
 
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
-import { decryptFacebookToken } from '@/lib/facebook-token';
+import { decryptFacebookToken, encryptFacebookToken } from '@/lib/facebook-token';
 
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
 const FB_GRAPH_API_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
@@ -99,21 +99,30 @@ async function fetchFacebookPostInsights(postId: string, accessToken: string) {
 
 /* =========================================================
    INSTAGRAM — media-level insights
-   NOTE: for some media/account types Meta has replaced the
-   "impressions" metric with "views" — if this starts erroring,
-   switch the metric list to metric=views,reach,profile_visits.
+   Some media product types reject impressions; retry those media
+   with views while retaining reach/profile visit metrics.
 ========================================================= */
 async function fetchInstagramMediaInsights(mediaId: string, accessToken: string) {
-  const url =
-    `${IG_GRAPH_API_BASE}/${mediaId}/insights` +
-    `?metric=impressions,reach,profile_visits` +
-    `&access_token=${encodeURIComponent(accessToken)}`;
+  const requestMetrics = async (metrics: string) => {
+    const url = new URL(`${IG_GRAPH_API_BASE}/${encodeURIComponent(mediaId)}/insights`);
+    url.searchParams.set('metric', metrics);
+    url.searchParams.set('access_token', accessToken);
+    const response = await fetch(url, { cache: 'no-store' });
+    const data = await response.json();
+    return { response, data };
+  };
 
-  const response = await fetch(url, { cache: 'no-store' });
-  const data = await response.json();
-
+  let { response, data } = await requestMetrics('impressions,reach,profile_visits');
   if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'Instagram insights request failed'));
+    const errorMessage = getErrorMessage(data, 'Instagram insights request failed');
+    if (!/does not support the impressions metric/i.test(errorMessage)) {
+      throw new Error(errorMessage);
+    }
+
+    ({ response, data } = await requestMetrics('views,reach,profile_visits'));
+    if (!response.ok) {
+      throw new Error(getErrorMessage(data, 'Instagram insights request failed'));
+    }
   }
 
   const byName: Record<string, number> = {};
@@ -122,7 +131,8 @@ async function fetchInstagramMediaInsights(mediaId: string, accessToken: string)
   }
 
   return {
-    impressions: byName.impressions || 0,
+    impressions: byName.impressions ?? byName.views ?? 0,
+    views: byName.views ?? byName.impressions ?? 0,
     reach: byName.reach || 0,
     profileVisits: byName.profile_visits || 0,
   };
@@ -139,7 +149,7 @@ async function fetchLinkedInShareStats(
   const url =
     `${LINKEDIN_API_BASE}/organizationalEntityShareStatistics` +
     `?q=organizationalEntity&organizationalEntity=${encodeURIComponent(organizationUrn)}` +
-    `&shares[0]=${encodeURIComponent(shareUrn)}`;
+    `&shares=${encodeURIComponent(`List(${shareUrn})`)}`;
 
   const response = await fetch(url, {
     headers: {
@@ -416,6 +426,27 @@ export async function GET(req: NextRequest) {
         row.status === 'active' &&
         (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
     );
+    let facebookPageAccessToken: string | null = null;
+    let facebookTokenError: string | null = null;
+    if (fbConnection?.accessToken) {
+      try {
+        facebookPageAccessToken = decryptFacebookToken(fbConnection.accessToken);
+        if (fbConnection.accessToken.split('.').length !== 3) {
+          try {
+            await db
+              .update(facebookConnections)
+              .set({ accessToken: encryptFacebookToken(facebookPageAccessToken) })
+              .where(eq(facebookConnections.id, fbConnection.id));
+          } catch (migrationError) {
+            console.error('[Analytics] Could not migrate legacy Facebook token encryption:', migrationError);
+          }
+        }
+      } catch (error) {
+        facebookTokenError =
+          error instanceof Error ? error.message : 'Stored Facebook token is invalid';
+        console.error('[Analytics] Facebook token could not be decrypted:', facebookTokenError);
+      }
+    }
     const igConnection = igConnRows.find(
       (row) =>
         row.status === 'active' &&
@@ -470,13 +501,16 @@ export async function GET(req: NextRequest) {
 
       try {
         if (row.platform === 'facebook' && fbConnection) {
-          const pageAccessToken = decryptFacebookToken(
-            String(fbConnection.accessToken || '')
-          );
-          target.platforms.facebook = await fetchFacebookPostInsights(
-            row.externalId,
-            pageAccessToken
-          );
+          if (!facebookPageAccessToken) {
+            target.platforms.facebook = {
+              error: facebookTokenError || 'Facebook Page token is unavailable.',
+            };
+          } else {
+            target.platforms.facebook = await fetchFacebookPostInsights(
+              row.externalId,
+              facebookPageAccessToken
+            );
+          }
         }
 
         if (row.platform === 'instagram' && igConnection) {
@@ -622,15 +656,17 @@ export async function GET(req: NextRequest) {
           clicks: sumMetric('facebook', 'clicks'),
           note: !fbConnection
             ? undefined
-            : publicationCount('facebook') === 0
-              ? 'Publish a Facebook post from AarnexAi to start tracking post insights.'
-              : insightError('facebook') || undefined,
+            : facebookTokenError ??
+              (publicationCount('facebook') === 0
+                ? 'Publish a Facebook post from AarnexAi to start tracking post insights.'
+                : insightError('facebook') || undefined),
         },
         instagram: {
           connected: Boolean(igConnection),
           accountName: igConnection?.instagramUsername || igConnection?.instagramName || null,
           posts: publicationCount('instagram'),
           impressions: sumMetric('instagram', 'impressions'),
+          views: sumMetric('instagram', 'views'),
           reach: sumMetric('instagram', 'reach'),
           profileVisits: sumMetric('instagram', 'profileVisits'),
           note: !igConnection
