@@ -214,6 +214,10 @@ async function fetchLinkedInShareStats(
   };
 }
 
+function isLinkedInAuthorMismatch(error: unknown): error is Error {
+  return error instanceof Error && /Unable to get activityIds|did not post them/i.test(error.message);
+}
+
 async function refreshGoogleAccessToken(refreshToken: string): Promise<string> {
   const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
@@ -262,7 +266,11 @@ async function fetchYoutubeChannelStats(accessToken: string) {
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'YouTube Analytics request failed'));
+    throw new Error(
+      response.status === 401 || response.status === 403
+        ? 'YouTube Analytics rejected the saved authorization or required scope. Reconnect YouTube and approve yt-analytics.readonly access.'
+        : getErrorMessage(data, 'YouTube Analytics request failed')
+    );
   }
 
   const row: number[] = data?.rows?.[0] || [0, 0, 0];
@@ -399,17 +407,60 @@ export async function GET(req: NextRequest) {
       };
 
       if (conn && pubs.length > 0) {
-        const ownerUrn = String(parseMetadata(conn.metadata).ownerUrn || '').trim();
+        const metadata = parseMetadata(conn.metadata);
+        const publicationOwners =
+          metadata.publicationOwners && typeof metadata.publicationOwners === 'object'
+            ? metadata.publicationOwners
+            : {};
+        const organizationOwners = [
+          String(metadata.selectedOrgUrn || ''),
+          ...(Array.isArray(metadata.organizations)
+            ? metadata.organizations.map((organization: any) => String(organization?.urn || ''))
+            : []),
+        ].filter(
+          (ownerUrn, index, owners) =>
+            /^urn:li:organization:[A-Za-z0-9_-]+$/.test(ownerUrn) &&
+            owners.indexOf(ownerUrn) === index
+        );
 
-        if (!ownerUrn.startsWith('urn:li:organization:')) {
+        if (!organizationOwners.length && !Object.values(publicationOwners).some(
+          (ownerUrn) => typeof ownerUrn === 'string' && ownerUrn.startsWith('urn:li:organization:')
+        )) {
           out.note =
             'LinkedIn only reports post analytics for company pages. Connect a company page to see impressions and clicks.';
         } else if (conn.accessToken) {
           const jobs = pubs
             .slice(0, MAX_POSTS_PER_PLATFORM)
-            .map((pub) =>
-              fetchLinkedInShareStats(ownerUrn, String(pub.externalId), String(conn.accessToken))
-            );
+            .map(async (pub) => {
+              const postId = String(pub.externalId);
+              const savedOwnerUrn = String(publicationOwners[postId] || '');
+              const candidates = [
+                ...(savedOwnerUrn.startsWith('urn:li:organization:') ? [savedOwnerUrn] : []),
+                ...organizationOwners,
+              ].filter((ownerUrn, index, owners) => owners.indexOf(ownerUrn) === index);
+              let lastMismatch: Error | null = null;
+
+              for (const ownerUrn of candidates) {
+                try {
+                  return await fetchLinkedInShareStats(
+                    ownerUrn,
+                    postId,
+                    String(conn.accessToken)
+                  );
+                } catch (error) {
+                  if (!isLinkedInAuthorMismatch(error) || savedOwnerUrn) throw error;
+                  lastMismatch = error;
+                }
+              }
+
+              if (lastMismatch) {
+                throw new Error(
+                  'LinkedIn could not match this older post to a connected company page. Republish it to track its metrics.'
+                );
+              }
+
+              throw new Error('No connected LinkedIn company page is available for this post.');
+            });
 
           const results = await Promise.allSettled(jobs);
           out.impressions = sumField(results, 'impressions');

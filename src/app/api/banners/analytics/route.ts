@@ -236,7 +236,11 @@ async function fetchYouTubeVideos(accessToken: string, limit: number) {
   });
   const channelData = await channelResponse.json();
   if (!channelResponse.ok) {
-    throw new Error(getErrorMessage(channelData, 'Could not load YouTube channel uploads'));
+    throw new Error(
+      channelResponse.status === 401 || channelResponse.status === 403
+        ? 'YouTube rejected the saved authorization or required scope. Reconnect YouTube and approve youtube.readonly access.'
+        : getErrorMessage(channelData, 'Could not load YouTube channel uploads')
+    );
   }
 
   const uploadsPlaylistId = channelData?.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
@@ -320,6 +324,10 @@ async function fetchLinkedInShareStats(
   if (!/^urn:li:organization:[A-Za-z0-9_-]+$/.test(organizationUrn)) {
     throw new Error('LinkedIn post analytics require a valid company-page URN.');
   }
+
+  function isLinkedInAuthorMismatch(error: unknown): boolean {
+    return error instanceof Error && /Unable to get activityIds|did not post them/i.test(error.message);
+  }
   if (!/^urn:li:(share|ugcPost):[A-Za-z0-9_-]+$/.test(shareUrn)) {
     throw new Error('The saved LinkedIn post ID is not a supported share URN.');
   }
@@ -354,6 +362,10 @@ async function fetchLinkedInShareStats(
     comments: stats.commentCount || 0,
     shares: stats.shareCount || 0,
   };
+}
+
+function isLinkedInAuthorMismatch(error: unknown): error is Error {
+  return error instanceof Error && /Unable to get activityIds|did not post them/i.test(error.message);
 }
 
 /* =========================================================
@@ -742,29 +754,54 @@ export async function GET(req: NextRequest) {
           const organizations = Array.isArray(liMetadata.organizations)
             ? liMetadata.organizations
             : [];
-          const selectedTargets = Array.isArray(liMetadata.selectedTargets)
-            ? liMetadata.selectedTargets.filter((target: unknown) => typeof target === 'string')
-            : [];
-          const selectedOrgUrn = String(liMetadata.selectedOrgUrn || '').trim();
-          const ownerUrn = selectedOrgUrn.startsWith('urn:li:organization:') &&
-              (!selectedTargets.length || selectedTargets.includes(selectedOrgUrn))
-            ? selectedOrgUrn
-            : !selectedTargets.length && organizations.length === 1 &&
-                String((organizations[0] as Record<string, unknown>)?.urn || '').startsWith('urn:li:organization:')
-              ? String((organizations[0] as Record<string, unknown>).urn)
-              : '';
+          const publicationOwners =
+            liMetadata.publicationOwners &&
+            typeof liMetadata.publicationOwners === 'object'
+              ? liMetadata.publicationOwners as Record<string, unknown>
+              : {};
+          const savedOwnerUrn = String(publicationOwners[row.externalId] || '').trim();
+          const organizationOwners = organizations.map(
+            (organization: Record<string, unknown>) => String(organization.urn || '')
+          );
+          const candidateOwners = [
+            ...(savedOwnerUrn.startsWith('urn:li:organization:') ? [savedOwnerUrn] : []),
+            ...organizationOwners,
+          ].filter(
+            (ownerUrn, index, owners) =>
+              /^urn:li:organization:[A-Za-z0-9_-]+$/.test(ownerUrn) &&
+              owners.indexOf(ownerUrn) === index
+          );
 
-          if (!ownerUrn) {
+          if (savedOwnerUrn.startsWith('urn:li:person:')) {
+            publicationMetrics.linkedin = target.platforms.linkedin = {
+              note: 'LinkedIn does not provide these company-page metrics for a personal-profile post.',
+            };
+          } else if (!candidateOwners.length) {
             publicationMetrics.linkedin = target.platforms.linkedin = {
               note: 'LinkedIn post analytics are available for company-page posts. Select/connect a company page to view these metrics.',
             };
           } else {
-            publicationMetrics.linkedin = target.platforms.linkedin =
-              await fetchLinkedInShareStats(
-                ownerUrn,
-                row.externalId,
-                String(liConnection.accessToken || '')
+            let lastAuthorMismatch: Error | null = null;
+            for (const ownerUrn of candidateOwners) {
+              try {
+                publicationMetrics.linkedin = target.platforms.linkedin =
+                  await fetchLinkedInShareStats(
+                    ownerUrn,
+                    row.externalId,
+                    String(liConnection.accessToken || '')
+                  );
+                break;
+              } catch (error) {
+                if (!isLinkedInAuthorMismatch(error) || savedOwnerUrn) throw error;
+                lastAuthorMismatch = error;
+              }
+            }
+
+            if (!publicationMetrics.linkedin && lastAuthorMismatch) {
+              throw new Error(
+                'LinkedIn could not match this older post to a connected profile or company page. New posts will store their publishing target; republish this post to track its metrics.'
               );
+            }
           }
         } else if (row.platform === 'linkedin') {
           publicationMetrics.linkedin = {
@@ -862,15 +899,14 @@ export async function GET(req: NextRequest) {
     let youtubeVideosNote: string | undefined;
     if (ytConnection?.accessToken || ytConnection?.refreshToken) {
       try {
-        const tokenExpired =
-          !ytConnection.accessToken ||
-          (ytConnection.expiresAt && new Date(ytConnection.expiresAt).getTime() <= Date.now() + 60_000);
         let accessToken = String(ytConnection.accessToken || '');
-        if (tokenExpired) {
-          if (!ytConnection.refreshToken) {
-            throw new Error('Reconnect YouTube to grant video analytics access.');
-          }
+        if (ytConnection.refreshToken) {
           accessToken = await fetchGoogleAccessToken(String(ytConnection.refreshToken));
+        } else if (
+          !accessToken ||
+          (ytConnection.expiresAt && new Date(ytConnection.expiresAt).getTime() <= Date.now())
+        ) {
+          throw new Error('Reconnect YouTube to grant video analytics access.');
         }
         youtubeVideos = await fetchYouTubeVideos(accessToken, 30);
       } catch (error) {

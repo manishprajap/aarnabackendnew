@@ -1680,6 +1680,26 @@ export async function POST(req: NextRequest) {
             }
           }
 
+          if (posted.length > 0) {
+            const publicationOwners = {
+              ...(metadata.publicationOwners &&
+              typeof metadata.publicationOwners === 'object' &&
+              !Array.isArray(metadata.publicationOwners)
+                ? metadata.publicationOwners
+                : {}),
+              ...Object.fromEntries(posted.map(({ postId, ownerUrn }) => [postId, ownerUrn])),
+            };
+
+            try {
+              await db
+                .update(socialAccounts)
+                .set({ metadata: { ...metadata, publicationOwners } })
+                .where(eq(socialAccounts.id, connection.id));
+            } catch (error) {
+              console.error('[LinkedIn] Could not save post author metadata for analytics:', error);
+            }
+          }
+
           results.linkedin = {
             success: posted.length > 0,
             requestedTargets: targets,

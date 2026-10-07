@@ -144,9 +144,9 @@ function AdminShell({ children }: { children: React.ReactNode }) {
 });
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
-      <aside className="flex w-64 shrink-0 flex-col bg-slate-900 px-4 py-6">
-        <div className="mb-8 flex items-center gap-2.5 px-2">
+    <div className="flex min-h-screen flex-col bg-slate-50 lg:flex-row">
+      <aside className="flex w-full shrink-0 flex-col border-b border-slate-800 bg-slate-900 px-4 py-4 sm:px-6 lg:min-h-screen lg:w-64 lg:border-b-0 lg:px-4 lg:py-6">
+        <div className="mb-4 flex items-center gap-2.5 px-2 lg:mb-8">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white">
             A
           </div>
@@ -156,19 +156,19 @@ function AdminShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1">{navLinks}</nav>
+        <nav className="flex flex-wrap gap-1 lg:flex-1 lg:flex-col lg:space-y-1">{navLinks}</nav>
 
         <button
           onClick={handleLogout}
-          className="mt-4 flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-slate-400 hover:bg-slate-800 hover:text-red-400"
+          className="mt-3 flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-slate-400 hover:bg-slate-800 hover:text-red-400 lg:mt-4"
         >
           <LogoutIcon />
           Logout
         </button>
       </aside>
 
-      <div className="flex flex-1 flex-col">
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-8">
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-6 lg:px-8">
           <p className="text-sm font-medium text-slate-500">{activeItem.label}</p>
 
           <div className="flex items-center gap-3">
@@ -179,7 +179,7 @@ function AdminShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        <main className="flex-1 px-8 py-8">{children}</main>
+        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">{children}</main>
       </div>
     </div>
   );
