@@ -31,7 +31,7 @@ import { decryptFacebookToken, encryptFacebookToken } from '@/lib/facebook-token
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
 const FB_GRAPH_API_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 const IG_GRAPH_API_BASE = `https://graph.instagram.com/${META_GRAPH_VERSION}`;
-const LINKEDIN_API_BASE = 'https://api.linkedin.com/v2';
+const LINKEDIN_REST_BASE = 'https://api.linkedin.com/rest';
 const GA4_DATA_API_BASE = 'https://analyticsdata.googleapis.com/v1beta';
 const GOOGLE_BUSINESS_PERFORMANCE_API_BASE =
   'https://businessprofileperformance.googleapis.com/v1';
@@ -94,7 +94,10 @@ async function fetchFacebookPostInsights(postId: string, accessToken: string) {
     metrics.clicks = byName.post_clicks || 0;
   } catch (error) {
     console.warn(`[Analytics] Facebook impressions unavailable for ${postId}:`, error);
-    metrics.insightsNote = 'Facebook reach/impressions are unavailable for this post.';
+    metrics.insightsNote =
+      error instanceof Error
+        ? error.message
+        : 'Facebook reach/impressions are unavailable for this post.';
   }
 
   try {
@@ -116,7 +119,11 @@ async function fetchFacebookPostInsights(postId: string, accessToken: string) {
     return { ...metrics, ...engagement };
   } catch (error) {
     console.warn(`[Analytics] Facebook likes/comments unavailable for ${postId}:`, error);
-    metrics.engagementNote = 'Facebook likes/comments are unavailable for this post.';
+    const message =
+      error instanceof Error ? error.message : 'Facebook likes/comments are unavailable for this post.';
+    metrics.engagementNote = /#10|pages_read_engagement/i.test(message)
+      ? 'Facebook requires pages_read_engagement for likes and comments. Reconnect Facebook and grant that permission.'
+      : message;
     return metrics;
   }
 }
@@ -185,12 +192,18 @@ async function fetchInstagramEngagement(mediaId: string, accessToken: string) {
 }
 
 async function fetchGoogleAccessToken(refreshToken: string): Promise<string> {
+  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    throw new Error('YouTube analytics is not configured: Google OAuth client credentials are missing.');
+  }
+
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: process.env.GOOGLE_CLIENT_ID || '',
-      client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+      client_id: clientId,
+      client_secret: clientSecret,
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
     }),
@@ -199,7 +212,14 @@ async function fetchGoogleAccessToken(refreshToken: string): Promise<string> {
   const data = await response.json();
 
   if (!response.ok || !data.access_token) {
-    throw new Error(getErrorMessage(data, 'YouTube access token refresh failed'));
+    const errorCode = typeof data?.error === 'string' ? data.error : '';
+    const description =
+      typeof data?.error_description === 'string' ? data.error_description : '';
+    throw new Error(
+      errorCode === 'invalid_grant'
+        ? 'YouTube authorization expired or was revoked. Reconnect YouTube and grant video analytics access.'
+        : description || getErrorMessage(data, 'YouTube access token refresh failed')
+    );
   }
 
   return String(data.access_token);
@@ -297,15 +317,24 @@ async function fetchLinkedInShareStats(
   shareUrn: string,
   accessToken: string
 ) {
+  if (!/^urn:li:organization:[A-Za-z0-9_-]+$/.test(organizationUrn)) {
+    throw new Error('LinkedIn post analytics require a valid company-page URN.');
+  }
+  if (!/^urn:li:(share|ugcPost):[A-Za-z0-9_-]+$/.test(shareUrn)) {
+    throw new Error('The saved LinkedIn post ID is not a supported share URN.');
+  }
+
+  const listParam = shareUrn.startsWith('urn:li:ugcPost:') ? 'ugcPosts' : 'shares';
   const url =
-    `${LINKEDIN_API_BASE}/organizationalEntityShareStatistics` +
+    `${LINKEDIN_REST_BASE}/organizationalEntityShareStatistics` +
     `?q=organizationalEntity&organizationalEntity=${encodeURIComponent(organizationUrn)}` +
-    `&shares=${encodeURIComponent(`List(${shareUrn})`)}`;
+    `&${listParam}=List(${encodeURIComponent(shareUrn)})`;
 
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       'X-Restli-Protocol-Version': '2.0.0',
+      'LinkedIn-Version': process.env.LINKEDIN_API_VERSION || '202606',
     },
     cache: 'no-store',
   });
@@ -542,11 +571,13 @@ export async function GET(req: NextRequest) {
           .groupBy(whatsappMessages.direction),
       ]);
 
-    const fbConnection = fbConnRows.find(
+    const activeFbConnections = fbConnRows.filter(
       (row) =>
         row.status === 'active' &&
+        Boolean(row.accessToken) &&
         (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
     );
+    const fbConnection = activeFbConnections[0];
     let facebookPageAccessToken: string | null = null;
     let facebookTokenError: string | null = null;
     if (fbConnection?.accessToken) {
@@ -638,18 +669,30 @@ export async function GET(req: NextRequest) {
     for (const row of publicationRows) {
       const target = bannersOut[row.bannerId];
       if (!target) continue;
+      const publicationMetrics: Record<string, unknown> = {};
 
       try {
-        if (row.platform === 'facebook' && fbConnection) {
-          if (!facebookPageAccessToken) {
-            target.platforms.facebook = {
-              error: facebookTokenError || 'Facebook Page token is unavailable.',
+        if (row.platform === 'facebook') {
+          const pageId = String(row.externalId).split('_')[0];
+          const postPageConnection = activeFbConnections.find(
+            (connection) => String(connection.pageId) === pageId
+          );
+
+          if (!postPageConnection) {
+            publicationMetrics.facebook = target.platforms.facebook = {
+              error: `Facebook Page ${pageId} is not connected. Reconnect that Page to view its post analytics.`,
             };
           } else {
-            target.platforms.facebook = await fetchFacebookPostInsights(
-              row.externalId,
-              facebookPageAccessToken
-            );
+            try {
+              const pageToken = decryptFacebookToken(String(postPageConnection.accessToken || ''));
+              publicationMetrics.facebook = target.platforms.facebook =
+                await fetchFacebookPostInsights(row.externalId, pageToken);
+            } catch (error) {
+              console.error(`[Analytics] Facebook insights failed for Page ${pageId}:`, error);
+              publicationMetrics.facebook = target.platforms.facebook = {
+                error: error instanceof Error ? error.message : 'Facebook Page token is unavailable.',
+              };
+            }
           }
         }
 
@@ -663,7 +706,10 @@ export async function GET(req: NextRequest) {
             );
           } catch (error) {
             console.warn(`[Analytics] Instagram views unavailable for ${row.externalId}:`, error);
-            instagramMetrics.insightsNote = 'Instagram views/reach are unavailable for this post.';
+            instagramMetrics.insightsNote =
+              error instanceof Error
+                ? error.message
+                : 'Instagram views/reach are unavailable for this post.';
           }
 
           let engagement: Record<string, number | string> = {};
@@ -674,25 +720,56 @@ export async function GET(req: NextRequest) {
             );
           } catch (error) {
             console.warn(`[Analytics] Instagram likes/comments unavailable for ${row.externalId}:`, error);
-            engagement.engagementNote = 'Instagram likes/comments are unavailable for this post.';
+            const message =
+              error instanceof Error
+                ? error.message
+                : 'Instagram likes/comments are unavailable for this post.';
+            engagement.engagementNote = /instagram_business_manage_insights|permission/i.test(message)
+              ? 'Reconnect Instagram and grant the instagram_business_manage_insights permission.'
+              : message;
           }
-          target.platforms.instagram = { ...instagramMetrics, ...engagement };
+          publicationMetrics.instagram = target.platforms.instagram = {
+            ...instagramMetrics,
+            ...engagement,
+          };
+        } else if (row.platform === 'instagram') {
+          publicationMetrics.instagram = {
+            note: 'Instagram account is not connected. Reconnect Instagram to view post analytics.',
+          };
         }
 
         if (row.platform === 'linkedin' && liConnection) {
-          const ownerUrn = String(liMetadata.ownerUrn || '').trim();
+          const organizations = Array.isArray(liMetadata.organizations)
+            ? liMetadata.organizations
+            : [];
+          const selectedTargets = Array.isArray(liMetadata.selectedTargets)
+            ? liMetadata.selectedTargets.filter((target: unknown) => typeof target === 'string')
+            : [];
+          const selectedOrgUrn = String(liMetadata.selectedOrgUrn || '').trim();
+          const ownerUrn = selectedOrgUrn.startsWith('urn:li:organization:') &&
+              (!selectedTargets.length || selectedTargets.includes(selectedOrgUrn))
+            ? selectedOrgUrn
+            : !selectedTargets.length && organizations.length === 1 &&
+                String((organizations[0] as Record<string, unknown>)?.urn || '').startsWith('urn:li:organization:')
+              ? String((organizations[0] as Record<string, unknown>).urn)
+              : '';
 
           if (!ownerUrn) {
-            target.platforms.linkedin = {
-              error: 'LinkedIn connection is missing an ownerUrn in metadata.',
+            publicationMetrics.linkedin = target.platforms.linkedin = {
+              note: 'LinkedIn post analytics are available for company-page posts. Select/connect a company page to view these metrics.',
             };
           } else {
-            target.platforms.linkedin = await fetchLinkedInShareStats(
-              ownerUrn,
-              row.externalId,
-              String(liConnection.accessToken || '')
-            );
+            publicationMetrics.linkedin = target.platforms.linkedin =
+              await fetchLinkedInShareStats(
+                ownerUrn,
+                row.externalId,
+                String(liConnection.accessToken || '')
+              );
           }
+        } else if (row.platform === 'linkedin') {
+          publicationMetrics.linkedin = {
+            note: 'LinkedIn account is not connected. Reconnect LinkedIn to view post analytics.',
+          };
         }
 
         if (row.platform === 'google_business') {
@@ -700,15 +777,22 @@ export async function GET(req: NextRequest) {
           // metrics (views/searches for the whole location), not a
           // breakdown per individual local post — so there's no
           // meaningful per-banner number to show here yet.
-          target.platforms.google_business = {
+          publicationMetrics.google_business = target.platforms.google_business = {
             note: 'Google Business only reports location-level performance, not per-post metrics.',
           };
         }
       } catch (error: any) {
         console.error(`[Analytics] ${row.platform} insights failed for banner ${row.bannerId}:`, error);
-        target.platforms[row.platform] = {
+        publicationMetrics[row.platform] = target.platforms[row.platform] = {
           error: error?.message || `${row.platform} insights request failed`,
         };
+      }
+
+      const publication = target.publications.find(
+        (item: { id: number }) => item.id === row.id
+      );
+      if (publication) {
+        publication.metrics = publicationMetrics[row.platform] || {};
       }
     }
 
@@ -792,7 +876,10 @@ export async function GET(req: NextRequest) {
       } catch (error) {
         youtubeVideosNote =
           error instanceof Error ? error.message : 'Unable to load YouTube video insights.';
-        console.error('[Analytics] YouTube video insights failed:', error);
+        console.error('[Analytics] YouTube video insights failed:', {
+          message: youtubeVideosNote,
+          providerAccountId: ytConnection.providerAccountId,
+        });
       }
     }
 

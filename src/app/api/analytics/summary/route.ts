@@ -215,19 +215,32 @@ async function fetchLinkedInShareStats(
 }
 
 async function refreshGoogleAccessToken(refreshToken: string): Promise<string> {
+  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) {
+    throw new Error('YouTube analytics is not configured: Google OAuth client credentials are missing.');
+  }
+
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: process.env.GOOGLE_CLIENT_ID || '',
-      client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+      client_id: clientId,
+      client_secret: clientSecret,
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
     }),
   });
   const data = await res.json();
   if (!res.ok || !data.access_token) {
-    throw new Error(getErrorMessage(data, 'Google token refresh failed'));
+    const errorCode = typeof data?.error === 'string' ? data.error : '';
+    const description =
+      typeof data?.error_description === 'string' ? data.error_description : '';
+    throw new Error(
+      errorCode === 'invalid_grant'
+        ? 'YouTube authorization expired or was revoked. Reconnect YouTube and grant analytics access.'
+        : description || getErrorMessage(data, 'Google token refresh failed')
+    );
   }
   return data.access_token as string;
 }
@@ -437,7 +450,9 @@ export async function GET(req: NextRequest) {
           out.comments = stats.comments;
         } catch (error: any) {
           console.warn('[AnalyticsSummary] youtube:', error?.message || error);
-          out.note = 'YouTube insights are unavailable. Try reconnecting YouTube.';
+          out.note = error instanceof Error
+            ? error.message
+            : 'YouTube insights are unavailable. Try reconnecting YouTube.';
         }
       }
 
