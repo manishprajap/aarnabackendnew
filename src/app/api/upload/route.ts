@@ -311,21 +311,7 @@ export async function POST(req: NextRequest) {
       { status: 201, headers: corsHeaders(origin) }
     );
   } catch (error: any) {
-    console.error('========================================');
-    console.error('UPLOAD API ERROR');
-    console.error('========================================');
-    console.error('Error message:', error?.message);
-    console.error('Error code:', error?.code);
-    console.error('Error errno:', error?.errno);
-    console.error('Error sqlMessage:', error?.sqlMessage);
-    console.error('Error sqlState:', error?.sqlState);
-    console.error('Full error:', error);
-
-    /*
-    |--------------------------------------------------------------------------
-    | Remove uploaded file if DB insert failed
-    |--------------------------------------------------------------------------
-    */
+    
 
     if (savedFilePath) {
       try {
