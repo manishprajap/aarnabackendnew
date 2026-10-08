@@ -123,8 +123,10 @@ export async function POST(
           FACEBOOK_SCOPES.join(','),
       });
 
+    const graphVersion =
+      process.env.META_GRAPH_VERSION || 'v24.0';
     const authUrl =
-      `https://www.facebook.com/dialog/oauth?${params.toString()}`;
+      `https://www.facebook.com/${graphVersion}/dialog/oauth?${params.toString()}`;
 
     /**
      * appUrl is intentionally referenced so configuration
