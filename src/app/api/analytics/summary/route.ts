@@ -12,15 +12,21 @@ import {
   facebookConnections,
   instagramConnections,
   socialAccounts,
+  whatsappConnections,
+  whatsappConversations,
+  whatsappMessages,
 } from '@/db/schema';
 
-import { eq, sql } from 'drizzle-orm';
+import { eq, count, sum } from 'drizzle-orm';
 
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { decryptFacebookToken } from '@/lib/facebook-token';
+import {
+  fetchFacebookPostMetrics,
+  type FacebookPostMetrics,
+} from '@/lib/facebook-insights';
 
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
-const FB_GRAPH_API_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 const IG_GRAPH_API_BASE = `https://graph.instagram.com/${META_GRAPH_VERSION}`;
 const LINKEDIN_REST_BASE = 'https://api.linkedin.com/rest';
 const YOUTUBE_ANALYTICS_API_BASE = 'https://youtubeanalytics.googleapis.com/v2';
@@ -51,6 +57,8 @@ type PlatformAnalytics = {
   shares?: number | null;
   conversations?: number | null;
   messages?: number | null;
+  incomingMessages?: number | null;
+  outgoingMessages?: number | null;
   unread?: number | null;
   note?: string;
   periodDays?: number;
@@ -110,49 +118,9 @@ function firstFailure(results: PromiseSettledResult<unknown>[]): string | null {
   return null;
 }
 
-// Runs a raw count/sum query, returns null if the table/column doesn't exist.
-async function safeNumberQuery(query: any, label: string): Promise<number | null> {
-  try {
-    const res: any = await db.execute(query);
-    const rows = Array.isArray(res?.[0]) ? res[0] : res?.rows ?? res;
-    const first = Array.isArray(rows) ? rows[0] : null;
-    if (!first) return null;
-    const value = Object.values(first)[0];
-    return Number(value) || 0;
-  } catch (error: any) {
-    console.warn(`[AnalyticsSummary] ${label} query failed:`, error?.message || error);
-    return null;
-  }
-}
-
 /* =========================================================
    Platform fetchers
 ========================================================= */
-
-async function fetchFacebookPostInsights(postId: string, accessToken: string) {
-  const url =
-    `${FB_GRAPH_API_BASE}/${postId}/insights` +
-    `?metric=post_impressions,post_impressions_unique,post_clicks` +
-    `&access_token=${encodeURIComponent(accessToken)}`;
-
-  const response = await fetch(url, { cache: 'no-store' });
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'Facebook insights request failed'));
-  }
-
-  const byName: Record<string, number> = {};
-  for (const metric of data?.data || []) {
-    byName[metric.name] = metric.values?.[0]?.value ?? 0;
-  }
-
-  return {
-    impressions: byName.post_impressions || 0,
-    reach: byName.post_impressions_unique || 0,
-    clicks: byName.post_clicks || 0,
-  };
-}
 
 async function fetchInstagramMediaInsights(mediaId: string, accessToken: string) {
   const url =
@@ -314,11 +282,43 @@ export async function GET(req: NextRequest) {
       throw error;
     }
 
-    const [fbConnRows, igConnRows, socialRows, publicationRows] = await Promise.all([
+    const [
+      fbConnRows,
+      igConnRows,
+      socialRows,
+      publicationRows,
+      waConnRows,
+      waConversationSummary,
+      waMessageRows,
+    ] = await Promise.all([
       db.select().from(facebookConnections).where(eq(facebookConnections.userId, userId)),
       db.select().from(instagramConnections).where(eq(instagramConnections.userId, userId)),
       db.select().from(socialAccounts).where(eq(socialAccounts.userId, userId)),
       db.select().from(bannerPublications).where(eq(bannerPublications.userId, userId)),
+      db
+        .select({
+          businessName: whatsappConnections.businessName,
+          businessPhoneNumber: whatsappConnections.businessPhoneNumber,
+          status: whatsappConnections.status,
+          tokenExpiresAt: whatsappConnections.tokenExpiresAt,
+        })
+        .from(whatsappConnections)
+        .where(eq(whatsappConnections.userId, userId)),
+      db
+        .select({
+          conversations: count(),
+          unread: sum(whatsappConversations.unreadCount),
+        })
+        .from(whatsappConversations)
+        .where(eq(whatsappConversations.userId, userId)),
+      db
+        .select({
+          direction: whatsappMessages.direction,
+          total: count(),
+        })
+        .from(whatsappMessages)
+        .where(eq(whatsappMessages.userId, userId))
+        .groupBy(whatsappMessages.direction),
     ]);
 
     const pubsBy = (platform: string) =>
@@ -331,37 +331,108 @@ export async function GET(req: NextRequest) {
     /* ---------------- FACEBOOK ---------------- */
     {
       const pubs = pubsBy('facebook');
-      const conn = fbConnRows[0] as any;
+      const activeFb = fbConnRows.filter(
+        (c) =>
+          c.status === 'active' &&
+          Boolean(c.accessToken) &&
+          (!c.tokenExpiresAt || new Date(c.tokenExpiresAt).getTime() > Date.now())
+      );
+      const conn = activeFb[0] as any;
+
       const out: PlatformAnalytics = {
-        connected: fbConnRows.length > 0,
+        connected: activeFb.length > 0,
         accountName: conn ? conn.pageName || conn.pageId || null : null,
         posts: pubs.length,
         impressions: null,
         reach: null,
         clicks: null,
+        likes: null,
+        comments: null,
       };
 
       if (out.connected && pubs.length > 0) {
-        const jobs = pubs.slice(0, MAX_POSTS_PER_PLATFORM).map(async (pub) => {
-          const pageId = String(pub.externalId).split('_')[0];
-          const match = fbConnRows.find((c) => String(c.pageId) === pageId);
-          if (!match) throw new Error(`Facebook page ${pageId} is not connected`);
-          const token = decryptFacebookToken(String(match.accessToken || ''));
-          return fetchFacebookPostInsights(String(pub.externalId), token);
-        });
+        const notConnectedPages = new Set<string>();
+        let unavailable = 0;
+        let failed = 0;
+        let firstIssue: string | null = null;
 
-        const results = await Promise.allSettled(jobs);
-        out.impressions = sumField(results, 'impressions');
-        out.reach = sumField(results, 'reach');
-        out.clicks = sumField(results, 'clicks');
+        const jobs = pubs.slice(0, MAX_POSTS_PER_PLATFORM).map(
+          async (pub): Promise<FacebookPostMetrics | null> => {
+            const pageId = String(pub.externalId).split('_')[0];
+            const match = activeFb.find((c) => String(c.pageId) === pageId);
 
-        const failure = firstFailure(results);
-        if (failure) {
-          console.warn('[AnalyticsSummary] facebook:', failure);
-          if (out.impressions === null) {
-            out.note = 'Facebook insights are unavailable for your published posts right now.';
+            if (!match) {
+              notConnectedPages.add(pageId);
+              return null;
+            }
+
+            try {
+              const token = decryptFacebookToken(String(match.accessToken || ''));
+              const metrics = await fetchFacebookPostMetrics(String(pub.externalId), token);
+
+              if (metrics.unavailable) {
+                unavailable += 1;
+                return null;
+              }
+
+              const hasNumbers = ['impressions', 'reach', 'clicks', 'likes', 'comments'].some(
+                (key) => typeof (metrics as Record<string, unknown>)[key] === 'number'
+              );
+              if (!hasNumbers) {
+                failed += 1;
+                firstIssue ??= metrics.insightsNote || metrics.engagementNote || null;
+                return null;
+              }
+
+              return metrics;
+            } catch (error) {
+              failed += 1;
+              firstIssue ??= error instanceof Error ? error.message : 'Facebook token unavailable';
+              return null;
+            }
           }
+        );
+
+        const results = (await Promise.all(jobs)).filter(
+          (m): m is FacebookPostMetrics => m !== null
+        );
+
+        const total = (
+          key: 'impressions' | 'reach' | 'clicks' | 'likes' | 'comments'
+        ): number | null => {
+          let any = false;
+          let sumValue = 0;
+          for (const m of results) {
+            const v = m[key];
+            if (typeof v === 'number') {
+              any = true;
+              sumValue += v;
+            }
+          }
+          return any ? sumValue : null;
+        };
+
+        out.impressions = total('impressions');
+        out.reach = total('reach');
+        out.clicks = total('clicks');
+        out.likes = total('likes');
+        out.comments = total('comments');
+
+        const parts: string[] = [];
+        if (notConnectedPages.size > 0) {
+          parts.push(
+            `Reconnect Facebook and select these Pages to see their analytics: ${Array.from(
+              notConnectedPages
+            ).join(', ')}.`
+          );
         }
+        if (unavailable > 0) {
+          parts.push(`${unavailable} older post(s) are no longer available on Facebook.`);
+        }
+        if (failed > 0 && firstIssue) {
+          parts.push(firstIssue);
+        }
+        if (parts.length) out.note = parts.join(' ');
       }
 
       platforms.facebook = out;
@@ -370,11 +441,16 @@ export async function GET(req: NextRequest) {
     /* ---------------- INSTAGRAM ---------------- */
     {
       const pubs = pubsBy('instagram');
-      const conn = igConnRows[0] as any;
+      const conn = igConnRows.find(
+        (row) =>
+          row.status === 'active' &&
+          (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
+      ) as any;
+
       const out: PlatformAnalytics = {
-        connected: igConnRows.length > 0,
+        connected: Boolean(conn),
         accountName: conn
-          ? conn.username || conn.accountName || conn.instagramUsername || null
+          ? conn.instagramUsername || conn.username || conn.accountName || null
           : null,
         posts: pubs.length,
         impressions: null,
@@ -445,7 +521,7 @@ export async function GET(req: NextRequest) {
             .slice(0, MAX_POSTS_PER_PLATFORM)
             .map(async (pub) => {
               const postId = String(pub.externalId);
-              const savedOwnerUrn = String(publicationOwners[postId] || '');
+              const savedOwnerUrn = String((publicationOwners as Record<string, unknown>)[postId] || '');
               const candidates = [
                 ...(savedOwnerUrn.startsWith('urn:li:organization:') ? [savedOwnerUrn] : []),
                 ...organizationOwners,
@@ -539,43 +615,27 @@ export async function GET(req: NextRequest) {
       };
     }
 
-    /* ---------------- WHATSAPP ----------------
-       NOTE: table/column names below are assumptions
-       (whatsapp_connections / whatsapp_conversations / whatsapp_messages
-       with a user_id column, and unread_count on conversations).
-       If a query fails the value is returned as null and a warning is
-       logged; adjust the SQL to your real column names. */
+    /* ---------------- WHATSAPP ---------------- */
     {
-      const connCount = await safeNumberQuery(
-        sql`SELECT COUNT(*) AS c FROM whatsapp_connections WHERE user_id = ${userId}`,
-        'whatsapp_connections'
+      const waConnection = waConnRows.find(
+        (row) =>
+          row.status === 'active' &&
+          (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
       );
-      const connected = (connCount ?? 0) > 0;
+      const byDirection = Object.fromEntries(
+        waMessageRows.map((row) => [String(row.direction).toLowerCase(), Number(row.total) || 0])
+      );
+      const conversation = waConversationSummary[0];
 
-      const out: PlatformAnalytics = {
-        connected,
-        accountName: null,
-        conversations: null,
-        messages: null,
-        unread: null,
+      platforms.whatsapp = {
+        connected: Boolean(waConnection),
+        accountName: waConnection?.businessName || waConnection?.businessPhoneNumber || null,
+        conversations: Number(conversation?.conversations) || 0,
+        messages: Object.values(byDirection).reduce((total, value) => total + value, 0),
+        unread: Number(conversation?.unread) || 0,
+        incomingMessages: byDirection.inbound ?? byDirection.incoming ?? 0,
+        outgoingMessages: byDirection.outbound ?? byDirection.outgoing ?? 0,
       };
-
-      if (connected) {
-        out.conversations = await safeNumberQuery(
-          sql`SELECT COUNT(*) AS c FROM whatsapp_conversations WHERE user_id = ${userId}`,
-          'whatsapp_conversations'
-        );
-        out.messages = await safeNumberQuery(
-          sql`SELECT COUNT(*) AS c FROM whatsapp_messages WHERE user_id = ${userId}`,
-          'whatsapp_messages'
-        );
-        out.unread = await safeNumberQuery(
-          sql`SELECT COALESCE(SUM(unread_count), 0) AS c FROM whatsapp_conversations WHERE user_id = ${userId}`,
-          'whatsapp_unread'
-        );
-      }
-
-      platforms.whatsapp = out;
     }
 
     return NextResponse.json({ success: true, platforms });

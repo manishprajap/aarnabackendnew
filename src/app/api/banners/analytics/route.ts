@@ -27,16 +27,15 @@ import { eq, and, inArray, count, sum } from 'drizzle-orm';
 
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { decryptFacebookToken, encryptFacebookToken } from '@/lib/facebook-token';
+import { fetchFacebookPostMetrics } from '@/lib/facebook-insights';
 
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
-const FB_GRAPH_API_BASE = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 const IG_GRAPH_API_BASE = `https://graph.instagram.com/${META_GRAPH_VERSION}`;
 const LINKEDIN_REST_BASE = 'https://api.linkedin.com/rest';
 const GA4_DATA_API_BASE = 'https://analyticsdata.googleapis.com/v1beta';
 const GOOGLE_BUSINESS_PERFORMANCE_API_BASE =
   'https://businessprofileperformance.googleapis.com/v1';
 
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
 const MEDIA_ORIGIN = process.env.NEXT_PUBLIC_MEDIA_URL || 'https://aarnexai.com';
 
 function getErrorMessage(data: any, fallback: string): string {
@@ -75,8 +74,8 @@ function dateRange(days = 30) {
 }
 
 // social_accounts.metadata is a free-form JSON string holding whatever
-// extra fields a given provider needs beyond providerAccountId/accountName
-// (see schema-additions.ts / migration.sql). Parse it defensively.
+// extra fields a given provider needs beyond providerAccountId/accountName.
+// Parse it defensively.
 function parseAccountMetadata(raw: unknown): Record<string, any> {
   if (!raw) return {};
   try {
@@ -87,66 +86,27 @@ function parseAccountMetadata(raw: unknown): Record<string, any> {
   }
 }
 
-/* =========================================================
-   FACEBOOK — post-level insights
-   NOTE: post_impressions/post_clicks are Page-post metrics and
-   require the page access token, not a user token.
-========================================================= */
-async function fetchFacebookPostInsights(postId: string, accessToken: string) {
-  const url =
-    `${FB_GRAPH_API_BASE}/${postId}/insights` +
-    `?metric=post_impressions,post_impressions_unique,post_clicks` +
-    `&access_token=${encodeURIComponent(accessToken)}`;
+/**
+ * A banner can have several publications on the same platform
+ * (e.g. 4 Facebook Pages). Numbers are summed; text notes keep the
+ * first value seen.
+ */
+function mergePlatformMetrics(
+  platforms: Record<string, any>,
+  platform: string,
+  metrics: Record<string, unknown>
+) {
+  const existing: Record<string, any> = platforms[platform] ?? {};
 
-  const metrics: Record<string, number | string> = {};
-  try {
-    const response = await fetch(url, { cache: 'no-store' });
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(getErrorMessage(data, 'Facebook insights request failed'));
+  for (const [key, value] of Object.entries(metrics)) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      existing[key] = (typeof existing[key] === 'number' ? existing[key] : 0) + value;
+    } else if (value !== undefined && existing[key] === undefined) {
+      existing[key] = value;
     }
-
-    const byName: Record<string, number> = {};
-    for (const metric of data?.data || []) {
-      byName[metric.name] = metric.values?.[0]?.value ?? 0;
-    }
-    metrics.impressions = byName.post_impressions || 0;
-    metrics.reach = byName.post_impressions_unique || 0;
-    metrics.clicks = byName.post_clicks || 0;
-  } catch (error) {
-    console.warn(`[Analytics] Facebook impressions unavailable for ${postId}:`, error);
-    metrics.insightsNote =
-      error instanceof Error
-        ? error.message
-        : 'Facebook reach/impressions are unavailable for this post.';
   }
 
-  try {
-    const postUrl = new URL(`${FB_GRAPH_API_BASE}/${encodeURIComponent(postId)}`);
-    postUrl.searchParams.set('fields', 'likes.summary(true),comments.summary(true)');
-    postUrl.searchParams.set('access_token', accessToken);
-    const postResponse = await fetch(postUrl.toString(), { cache: 'no-store' });
-    const postData = await postResponse.json();
-
-    if (!postResponse.ok) {
-      throw new Error(getErrorMessage(postData, 'Facebook engagement request failed'));
-    }
-
-    const engagement: Record<string, number> = {};
-    const likeCount = postData?.likes?.summary?.total_count;
-    const commentCount = postData?.comments?.summary?.total_count;
-    if (Number.isFinite(Number(likeCount))) engagement.likes = Number(likeCount);
-    if (Number.isFinite(Number(commentCount))) engagement.comments = Number(commentCount);
-    return { ...metrics, ...engagement };
-  } catch (error) {
-    console.warn(`[Analytics] Facebook likes/comments unavailable for ${postId}:`, error);
-    const message =
-      error instanceof Error ? error.message : 'Facebook likes/comments are unavailable for this post.';
-    metrics.engagementNote = /#10|pages_read_engagement/i.test(message)
-      ? 'Facebook requires pages_read_engagement for likes and comments. Reconnect Facebook and grant that permission.'
-      : message;
-    return metrics;
-  }
+  platforms[platform] = existing;
 }
 
 /* =========================================================
@@ -338,6 +298,10 @@ async function fetchYouTubeVideos(accessToken: string, limit: number) {
 /* =========================================================
    LINKEDIN — organization share statistics
 ========================================================= */
+function isLinkedInAuthorMismatch(error: unknown): error is Error {
+  return error instanceof Error && /Unable to get activityIds|did not post them/i.test(error.message);
+}
+
 async function fetchLinkedInShareStats(
   organizationUrn: string,
   shareUrn: string,
@@ -347,9 +311,6 @@ async function fetchLinkedInShareStats(
     throw new Error('LinkedIn post analytics require a valid company-page URN.');
   }
 
-  function isLinkedInAuthorMismatch(error: unknown): boolean {
-    return error instanceof Error && /Unable to get activityIds|did not post them/i.test(error.message);
-  }
   if (!/^urn:li:(share|ugcPost):[A-Za-z0-9_-]+$/.test(shareUrn)) {
     throw new Error('The saved LinkedIn post ID is not a supported share URN.');
   }
@@ -386,15 +347,8 @@ async function fetchLinkedInShareStats(
   };
 }
 
-function isLinkedInAuthorMismatch(error: unknown): error is Error {
-  return error instanceof Error && /Unable to get activityIds|did not post them/i.test(error.message);
-}
-
 /* =========================================================
-   YOUTUBE ANALYTICS — channel-level only.
-   Banners aren't videos, so there's no per-banner YouTube metric;
-   this reports the connected channel's overall recent performance
-   so it still shows up on the dashboard.
+   GOOGLE BUSINESS — location-level stats
 ========================================================= */
 async function fetchGoogleBusinessLocationStats(
   locationId: string,
@@ -464,8 +418,6 @@ async function fetchGoogleBusinessLocationStats(
    landing page.
    ASSUMPTION: each banner's click-through link lands on
    /p/{bannerId} (or contains that path).
-   If your banners route to a different URL pattern, change the
-   CONTAINS filter value below to match it.
 ========================================================= */
 async function fetchGoogleAnalyticsForBanner(
   propertyId: string, // e.g. 'properties/123456789'
@@ -570,9 +522,7 @@ export async function GET(req: NextRequest) {
     const bannerById = new Map(bannerRows.map((b) => [b.id, b]));
 
     /* Connections — fetched once, reused for every publication row
-       of that platform. Facebook/Instagram still have their own
-       tables; LinkedIn/YouTube/Google Analytics are all rows in the
-       generic social_accounts table (provider column). */
+       of that platform. */
 
     const [fbConnRows, igConnRows, allSocialAccountRows, waConnRows, waConversationSummary, waMessageRows] =
       await Promise.all([
@@ -612,16 +562,15 @@ export async function GET(req: NextRequest) {
         (!row.tokenExpiresAt || new Date(row.tokenExpiresAt).getTime() > Date.now())
     );
     const fbConnection = activeFbConnections[0];
-    let facebookPageAccessToken: string | null = null;
     let facebookTokenError: string | null = null;
     if (fbConnection?.accessToken) {
       try {
-        facebookPageAccessToken = decryptFacebookToken(fbConnection.accessToken);
+        const decrypted = decryptFacebookToken(fbConnection.accessToken);
         if (fbConnection.accessToken.split('.').length !== 3) {
           try {
             await db
               .update(facebookConnections)
-              .set({ accessToken: encryptFacebookToken(facebookPageAccessToken) })
+              .set({ accessToken: encryptFacebookToken(decrypted) })
               .where(eq(facebookConnections.id, fbConnection.id));
           } catch (migrationError) {
             console.error('[Analytics] Could not migrate legacy Facebook token encryption:', migrationError);
@@ -698,6 +647,14 @@ export async function GET(req: NextRequest) {
       };
     }
 
+    /* Facebook summary counters (used for the account-level note) */
+    const facebookStats = {
+      notConnectedPages: new Set<string>(),
+      unavailable: 0,
+      failed: 0,
+      firstIssue: null as string | null,
+    };
+
     /* FACEBOOK + INSTAGRAM + LINKEDIN — per-publication metrics */
 
     for (const row of publicationRows) {
@@ -713,19 +670,39 @@ export async function GET(req: NextRequest) {
           );
 
           if (!postPageConnection) {
-            publicationMetrics.facebook = target.platforms.facebook = {
+            facebookStats.notConnectedPages.add(pageId);
+            const notConnected = {
               error: `Facebook Page ${pageId} is not connected. Reconnect that Page to view its post analytics.`,
             };
+            publicationMetrics.facebook = notConnected;
+            mergePlatformMetrics(target.platforms, 'facebook', notConnected);
           } else {
             try {
               const pageToken = decryptFacebookToken(String(postPageConnection.accessToken || ''));
-              publicationMetrics.facebook = target.platforms.facebook =
-                await fetchFacebookPostInsights(row.externalId, pageToken);
+              const metrics = await fetchFacebookPostMetrics(row.externalId, pageToken);
+
+              const hasNumbers = ['impressions', 'reach', 'clicks', 'likes', 'comments'].some(
+                (key) => typeof (metrics as Record<string, unknown>)[key] === 'number'
+              );
+
+              if (metrics.unavailable) {
+                facebookStats.unavailable += 1;
+              } else if (!hasNumbers) {
+                facebookStats.failed += 1;
+                facebookStats.firstIssue ??=
+                  metrics.insightsNote || metrics.engagementNote || null;
+              }
+
+              publicationMetrics.facebook = metrics;
+              mergePlatformMetrics(target.platforms, 'facebook', metrics);
             } catch (error) {
               console.error(`[Analytics] Facebook insights failed for Page ${pageId}:`, error);
-              publicationMetrics.facebook = target.platforms.facebook = {
-                error: error instanceof Error ? error.message : 'Facebook Page token is unavailable.',
-              };
+              const message =
+                error instanceof Error ? error.message : 'Facebook Page token is unavailable.';
+              facebookStats.failed += 1;
+              facebookStats.firstIssue ??= message;
+              publicationMetrics.facebook = { error: message };
+              mergePlatformMetrics(target.platforms, 'facebook', { error: message });
             }
           }
         }
@@ -762,10 +739,10 @@ export async function GET(req: NextRequest) {
               ? 'Reconnect Instagram and grant the instagram_business_manage_insights permission.'
               : message;
           }
-          publicationMetrics.instagram = target.platforms.instagram = {
-            ...instagramMetrics,
-            ...engagement,
-          };
+
+          const combined = { ...instagramMetrics, ...engagement };
+          publicationMetrics.instagram = combined;
+          mergePlatformMetrics(target.platforms, 'instagram', combined);
         } else if (row.platform === 'instagram') {
           publicationMetrics.instagram = {
             note: 'Instagram account is not connected. Reconnect Instagram to view post analytics.',
@@ -795,23 +772,28 @@ export async function GET(req: NextRequest) {
           );
 
           if (savedOwnerUrn.startsWith('urn:li:person:')) {
-            publicationMetrics.linkedin = target.platforms.linkedin = {
+            const note = {
               note: 'LinkedIn does not provide these company-page metrics for a personal-profile post.',
             };
+            publicationMetrics.linkedin = note;
+            mergePlatformMetrics(target.platforms, 'linkedin', note);
           } else if (!candidateOwners.length) {
-            publicationMetrics.linkedin = target.platforms.linkedin = {
+            const note = {
               note: 'LinkedIn post analytics are available for company-page posts. Select/connect a company page to view these metrics.',
             };
+            publicationMetrics.linkedin = note;
+            mergePlatformMetrics(target.platforms, 'linkedin', note);
           } else {
             let lastAuthorMismatch: Error | null = null;
             for (const ownerUrn of candidateOwners) {
               try {
-                publicationMetrics.linkedin = target.platforms.linkedin =
-                  await fetchLinkedInShareStats(
-                    ownerUrn,
-                    row.externalId,
-                    String(liConnection.accessToken || '')
-                  );
+                const stats = await fetchLinkedInShareStats(
+                  ownerUrn,
+                  row.externalId,
+                  String(liConnection.accessToken || '')
+                );
+                publicationMetrics.linkedin = stats;
+                mergePlatformMetrics(target.platforms, 'linkedin', stats);
                 break;
               } catch (error) {
                 if (!isLinkedInAuthorMismatch(error) || savedOwnerUrn) throw error;
@@ -833,18 +815,20 @@ export async function GET(req: NextRequest) {
 
         if (row.platform === 'google_business') {
           // Business Profile Performance API only exposes location-level
-          // metrics (views/searches for the whole location), not a
-          // breakdown per individual local post — so there's no
-          // meaningful per-banner number to show here yet.
-          publicationMetrics.google_business = target.platforms.google_business = {
+          // metrics, not a breakdown per individual local post.
+          const note = {
             note: 'Google Business only reports location-level performance, not per-post metrics.',
           };
+          publicationMetrics.google_business = note;
+          mergePlatformMetrics(target.platforms, 'google_business', note);
         }
       } catch (error: any) {
         console.error(`[Analytics] ${row.platform} insights failed for banner ${row.bannerId}:`, error);
-        publicationMetrics[row.platform] = target.platforms[row.platform] = {
+        const failure = {
           error: error?.message || `${row.platform} insights request failed`,
         };
+        publicationMetrics[row.platform] = failure;
+        mergePlatformMetrics(target.platforms, row.platform, failure);
       }
 
       const publication = target.publications.find(
@@ -852,6 +836,22 @@ export async function GET(req: NextRequest) {
       );
       if (publication) {
         publication.metrics = publicationMetrics[row.platform] || {};
+      }
+    }
+
+    /* If a platform entry has real numbers, drop the leftover
+       error / unavailable flags that came from other publications. */
+    for (const banner of Object.values(bannersOut)) {
+      for (const key of Object.keys(banner.platforms)) {
+        const entry = banner.platforms[key];
+        if (
+          entry &&
+          typeof entry === 'object' &&
+          Object.values(entry).some((value) => typeof value === 'number')
+        ) {
+          delete entry.error;
+          delete entry.unavailable;
+        }
       }
     }
 
@@ -913,6 +913,35 @@ export async function GET(req: NextRequest) {
       }
       return null;
     };
+
+    const buildFacebookNote = (): string | undefined => {
+      if (!fbConnection) return undefined;
+      if (facebookTokenError) return facebookTokenError;
+      if (publicationCount('facebook') === 0) {
+        return 'Publish a Facebook post from AarnexAi to start tracking post insights.';
+      }
+
+      const parts: string[] = [];
+
+      if (facebookStats.notConnectedPages.size > 0) {
+        parts.push(
+          `Reconnect Facebook and select these Pages to see their analytics: ${Array.from(
+            facebookStats.notConnectedPages
+          ).join(', ')}.`
+        );
+      }
+      if (facebookStats.unavailable > 0) {
+        parts.push(
+          `${facebookStats.unavailable} older post(s) are no longer available on Facebook.`
+        );
+      }
+      if (facebookStats.failed > 0 && facebookStats.firstIssue) {
+        parts.push(facebookStats.firstIssue);
+      }
+
+      return parts.length ? parts.join(' ') : undefined;
+    };
+
     const whatsappMessagesByDirection = Object.fromEntries(
       waMessageRows.map((row) => [String(row.direction).toLowerCase(), Number(row.total) || 0])
     );
@@ -957,12 +986,9 @@ export async function GET(req: NextRequest) {
           impressions: sumMetric('facebook', 'impressions'),
           reach: sumMetric('facebook', 'reach'),
           clicks: sumMetric('facebook', 'clicks'),
-          note: !fbConnection
-            ? undefined
-            : facebookTokenError ??
-              (publicationCount('facebook') === 0
-                ? 'Publish a Facebook post from AarnexAi to start tracking post insights.'
-                : insightError('facebook') || undefined),
+          likes: sumMetric('facebook', 'likes'),
+          comments: sumMetric('facebook', 'comments'),
+          note: buildFacebookNote(),
         },
         instagram: {
           connected: Boolean(igConnection),
@@ -972,6 +998,8 @@ export async function GET(req: NextRequest) {
           views: sumMetric('instagram', 'views'),
           reach: sumMetric('instagram', 'reach'),
           profileVisits: sumMetric('instagram', 'profileVisits'),
+          likes: sumMetric('instagram', 'likes'),
+          comments: sumMetric('instagram', 'comments'),
           note: !igConnection
             ? undefined
             : publicationCount('instagram') === 0

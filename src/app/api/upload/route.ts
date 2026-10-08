@@ -1,6 +1,7 @@
+// src/app/api/upload/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { products } from '@/db/schema';
+import { products, banners } from '@/db/schema';
 import { createId } from '@paralleldrive/cuid2';
 
 import fs from 'fs/promises';
@@ -17,6 +18,12 @@ const UPLOAD_BASE_DIR =
   process.env.UPLOAD_DIR || '/var/www/aarnexai.com/aarnexai-backend/upload';
 
 const UPLOAD_URL_PREFIX = '/upload';
+
+// banners.day is NOT NULL. Day 0 marks "the user's own uploaded image" so it
+// never collides with the generated campaign banners (day 1, 2, 3 ...).
+// Note: /banners/publish marks every banner with the same productId + day as
+// posted, so keeping this on its own day only affects this one row.
+const ORIGINAL_UPLOAD_BANNER_DAY = 0;
 
 /*
 |--------------------------------------------------------------------------
@@ -49,14 +56,20 @@ function parseOptionalId(raw: FormDataEntryValue | null, label: string): ParsedI
 const optionalText = (raw: FormDataEntryValue | null): string | null =>
   typeof raw === 'string' ? raw.trim() || null : null;
 
+const isTruthyFlag = (raw: FormDataEntryValue | null): boolean =>
+  typeof raw === 'string' && ['true', '1', 'yes'].includes(raw.trim().toLowerCase());
+
 /*
 |--------------------------------------------------------------------------
 | POST /api/upload
 |
-| Step 1 of the flow: only saves the image and creates the product row.
-| Category / subcategory / child category / aspect ratio / description are
-| optional here — they are sent later to POST /api/products/analyze when
-| the user taps "Generate Ad".
+| Saves the image and creates the product row.
+|
+| If the form field `createBanner=true` is sent, it ALSO creates a row in
+| `banners` pointing at the same image and returns its id as `bannerId`.
+| That is what POST /api/banners/publish needs to post a plain uploaded
+| image to social channels. The normal "Generate Ad" flow does not send
+| the flag, so it behaves exactly as before.
 |--------------------------------------------------------------------------
 */
 
@@ -78,6 +91,7 @@ export async function POST(req: NextRequest) {
 
     const file = formData.get('image');
     const userIdRaw = formData.get('userId');
+    const createBanner = isTruthyFlag(formData.get('createBanner'));
 
     /*
     |--------------------------------------------------------------------------
@@ -129,6 +143,9 @@ export async function POST(req: NextRequest) {
     const prompt = optionalText(formData.get('promptDescription'));
     const promptType = optionalText(formData.get('promptType'));
     const bannerColor = optionalText(formData.get('bannerColor'));
+    // Banner caption: an explicit `caption` field wins; otherwise the
+    // product description (promptDescription) is stored as the caption.
+    const bannerCaption = optionalText(formData.get('caption')) ?? prompt;
 
     /*
     |--------------------------------------------------------------------------
@@ -214,7 +231,8 @@ export async function POST(req: NextRequest) {
 
     /*
     |--------------------------------------------------------------------------
-    | Database insert
+    | Database insert (product, plus an optional banner) in ONE transaction,
+    | so a failed banner insert never leaves an orphan product row behind.
     |--------------------------------------------------------------------------
     */
 
@@ -230,21 +248,38 @@ export async function POST(req: NextRequest) {
       status: 'processing' as const,
     };
 
-    console.log('PRODUCT INSERT:', insertValues);
+    console.log('PRODUCT INSERT:', { ...insertValues, createBanner });
 
-    const result = await db.insert(products).values(insertValues);
+    const { productId, bannerId } = await db.transaction(async (tx) => {
+      const productResult = await tx.insert(products).values(insertValues);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Get inserted ID
-    |--------------------------------------------------------------------------
-    */
+      const newProductId = productResult[0]?.insertId;
 
-    const productId = result[0]?.insertId;
+      if (!newProductId) {
+        throw new Error('Product was inserted but insertId was not returned');
+      }
 
-    if (!productId) {
-      throw new Error('Product was inserted but insertId was not returned');
-    }
+      let newBannerId: number | null = null;
+
+      if (createBanner) {
+        const bannerResult = await tx.insert(banners).values({
+          productId: newProductId,
+          day: ORIGINAL_UPLOAD_BANNER_DAY,
+          theme: 'Original upload',
+          imageUrl,
+          caption: bannerCaption,
+          posted: false,
+        });
+
+        newBannerId = bannerResult[0]?.insertId ?? null;
+
+        if (!newBannerId) {
+          throw new Error('Banner was inserted but insertId was not returned');
+        }
+      }
+
+      return { productId: newProductId, bannerId: newBannerId };
+    });
 
     /*
     |--------------------------------------------------------------------------
@@ -258,6 +293,7 @@ export async function POST(req: NextRequest) {
         message: 'Product image uploaded successfully',
 
         productId: String(productId),
+        bannerId: bannerId ? String(bannerId) : null,
 
         imageUrl,
 
