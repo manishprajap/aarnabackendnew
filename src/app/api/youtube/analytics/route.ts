@@ -31,7 +31,11 @@ export async function GET(request: NextRequest) {
     }
 
     const [account] = await db
-      .select({ accessToken: socialAccounts.accessToken, expiresAt: socialAccounts.expiresAt })
+      .select({
+        accessToken: socialAccounts.accessToken,
+        expiresAt: socialAccounts.expiresAt,
+        metadata: socialAccounts.metadata,
+      })
       .from(socialAccounts)
       .where(and(eq(socialAccounts.userId, userId), eq(socialAccounts.provider, 'youtube')))
       .limit(1);
@@ -43,8 +47,20 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const metadata =
+      account.metadata && typeof account.metadata === 'object'
+        ? account.metadata as Record<string, unknown>
+        : {};
+    if (metadata.channelSelectionRequired === true) {
+      return NextResponse.json(
+        { success: false, message: 'Choose a YouTube channel before loading analytics' },
+        { status: 409 }
+      );
+    }
+    const channelId = typeof metadata.channelId === 'string' ? metadata.channelId : null;
+
     const params = new URLSearchParams({
-      ids: 'channel==MINE',
+      ids: channelId ? `channel==${channelId}` : 'channel==MINE',
       startDate,
       endDate,
       metrics,

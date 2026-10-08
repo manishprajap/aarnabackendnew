@@ -85,6 +85,7 @@ function dateRange(days = 30) {
 
 function parseMetadata(raw: unknown): Record<string, any> {
   if (!raw) return {};
+  if (typeof raw === 'object') return raw as Record<string, any>;
   try {
     const parsed = JSON.parse(String(raw));
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -222,12 +223,12 @@ async function refreshGoogleAccessToken(refreshToken: string): Promise<string> {
   return data.access_token as string;
 }
 
-async function fetchYoutubeChannelStats(accessToken: string) {
+async function fetchYoutubeChannelStats(accessToken: string, channelId?: string) {
   const { startDate, endDate } = dateRange(30);
 
   const url =
     `${YOUTUBE_ANALYTICS_API_BASE}/reports` +
-    `?ids=${encodeURIComponent('channel==MINE')}` +
+    `?ids=${encodeURIComponent(channelId ? `channel==${channelId}` : 'channel==MINE')}` +
     `&startDate=${startDate}&endDate=${endDate}` +
     `&metrics=views,likes,comments`;
 
@@ -567,8 +568,10 @@ export async function GET(req: NextRequest) {
     {
       const pubs = pubsBy('youtube');
       const conn = socialRows.find((r) => r.provider === 'youtube') as any;
+      const metadata = parseMetadata(conn?.metadata);
+      const selectionRequired = metadata.channelSelectionRequired === true;
       const out: PlatformAnalytics = {
-        connected: Boolean(conn),
+        connected: Boolean(conn) && !selectionRequired,
         accountName: conn?.accountName || null,
         posts: pubs.length,
         views: null,
@@ -577,13 +580,16 @@ export async function GET(req: NextRequest) {
         periodDays: 30,
       };
 
-      if (conn?.refreshToken || conn?.accessToken) {
+      if (!selectionRequired && (conn?.refreshToken || conn?.accessToken)) {
         try {
           let token = String(conn.accessToken || '');
           if (conn.refreshToken) {
             token = await refreshGoogleAccessToken(String(conn.refreshToken));
           }
-          const stats = await fetchYoutubeChannelStats(token);
+          const stats = await fetchYoutubeChannelStats(
+            token,
+            typeof metadata.channelId === 'string' ? metadata.channelId : undefined
+          );
           out.views = stats.views;
           out.likes = stats.likes;
           out.comments = stats.comments;

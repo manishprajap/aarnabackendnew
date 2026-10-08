@@ -78,6 +78,7 @@ function dateRange(days = 30) {
 // Parse it defensively.
 function parseAccountMetadata(raw: unknown): Record<string, any> {
   if (!raw) return {};
+  if (typeof raw === 'object') return raw as Record<string, any>;
   try {
     const parsed = JSON.parse(String(raw));
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -211,10 +212,11 @@ async function fetchGoogleAccessToken(refreshToken: string): Promise<string> {
   return String(data.access_token);
 }
 
-async function fetchYouTubeVideos(accessToken: string, limit: number) {
+async function fetchYouTubeVideos(accessToken: string, limit: number, channelId?: string) {
   const channelUrl = new URL('https://www.googleapis.com/youtube/v3/channels');
   channelUrl.searchParams.set('part', 'contentDetails');
-  channelUrl.searchParams.set('mine', 'true');
+  if (channelId) channelUrl.searchParams.set('id', channelId);
+  else channelUrl.searchParams.set('mine', 'true');
 
   const channelResponse = await fetch(channelUrl.toString(), {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -948,7 +950,9 @@ export async function GET(req: NextRequest) {
     const whatsappConversation = waConversationSummary[0];
     let youtubeVideos: Awaited<ReturnType<typeof fetchYouTubeVideos>> = [];
     let youtubeVideosNote: string | undefined;
-    if (ytConnection?.accessToken || ytConnection?.refreshToken) {
+    const youtubeMetadata = parseAccountMetadata(ytConnection?.metadata);
+    const youtubeSelectionRequired = youtubeMetadata.channelSelectionRequired === true;
+    if (!youtubeSelectionRequired && (ytConnection?.accessToken || ytConnection?.refreshToken)) {
       try {
         let accessToken = String(ytConnection.accessToken || '');
         if (ytConnection.refreshToken) {
@@ -959,7 +963,11 @@ export async function GET(req: NextRequest) {
         ) {
           throw new Error('Reconnect YouTube to grant video analytics access.');
         }
-        youtubeVideos = await fetchYouTubeVideos(accessToken, 30);
+        youtubeVideos = await fetchYouTubeVideos(
+          accessToken,
+          30,
+          typeof youtubeMetadata.channelId === 'string' ? youtubeMetadata.channelId : undefined
+        );
       } catch (error) {
         youtubeVideosNote =
           error instanceof Error ? error.message : 'Unable to load YouTube video insights.';
@@ -1020,7 +1028,7 @@ export async function GET(req: NextRequest) {
           }),
         },
         youtube: {
-          connected: Boolean(ytConnection?.accessToken),
+          connected: Boolean(ytConnection?.accessToken) && !youtubeSelectionRequired,
           accountName: ytConnection?.accountName || null,
           posts: publicationCount('youtube'),
           views: null,

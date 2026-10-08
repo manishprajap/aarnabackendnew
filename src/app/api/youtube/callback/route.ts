@@ -8,8 +8,8 @@ import {
   verifySocialOAuthState,
 } from '@/lib/socialOAuth';
 
-function redirectToFrontend(status: 'connected' | 'error', message?: string) {
-  const url = new URL(`${getSocialOAuthFrontendUrl()}/dashboard`);
+function redirectToFrontend(status: 'connected' | 'select' | 'no_account' | 'error', message?: string) {
+  const url = new URL(`${getSocialOAuthFrontendUrl()}/social-connections`);
   url.searchParams.set('youtube', status);
 
   if (message) {
@@ -63,6 +63,50 @@ export async function GET(request: NextRequest) {
 
     if (!tokenData.access_token) return redirectToFrontend('error', 'missing_access_token');
 
+    const channelsUrl = new URL('https://www.googleapis.com/youtube/v3/channels');
+    channelsUrl.searchParams.set('part', 'id,snippet,contentDetails');
+    channelsUrl.searchParams.set('mine', 'true');
+    channelsUrl.searchParams.set('maxResults', '50');
+    const channelsResponse = await fetch(channelsUrl, {
+      headers: { Authorization: 'Bearer ' + tokenData.access_token },
+      cache: 'no-store',
+    });
+    const channelsData = await channelsResponse.json() as {
+      items?: Array<{
+        id?: string;
+        snippet?: {
+          title?: string;
+          customUrl?: string;
+          thumbnails?: { default?: { url?: string }; medium?: { url?: string } };
+        };
+        contentDetails?: { relatedPlaylists?: { uploads?: string } };
+      }>;
+      error?: { message?: string };
+    };
+
+    if (!channelsResponse.ok) {
+      console.error('[YouTube Callback] Channel lookup failed:', {
+        status: channelsResponse.status,
+        message: channelsData.error?.message,
+      });
+      return redirectToFrontend('error', 'channel_lookup_failed');
+    }
+
+    const channels = (channelsData.items ?? [])
+      .filter((channel) => typeof channel.id === 'string' && channel.id.length > 0)
+      .map((channel) => ({
+        id: channel.id!,
+        title: channel.snippet?.title || 'YouTube channel',
+        customUrl: channel.snippet?.customUrl || null,
+        thumbnailUrl:
+          channel.snippet?.thumbnails?.medium?.url ||
+          channel.snippet?.thumbnails?.default?.url ||
+          null,
+        uploadsPlaylistId: channel.contentDetails?.relatedPlaylists?.uploads || null,
+      }));
+
+    if (channels.length === 0) return redirectToFrontend('no_account');
+
     const profileResponse = await fetch(
       'https://www.googleapis.com/oauth2/v3/userinfo',
       { headers: { Authorization: `Bearer ${tokenData.access_token}` }, cache: 'no-store' }
@@ -78,13 +122,25 @@ export async function GET(request: NextRequest) {
       .where(and(eq(socialAccounts.userId, stateData.userId), eq(socialAccounts.provider, provider)))
       .limit(1);
 
+    const selectedChannel = channels.length === 1 ? channels[0] : null;
     const values = {
       userId: stateData.userId,
       provider,
-      providerAccountId: profile.sub || null,
-      accountName: profile.name || profile.email || null,
+      providerAccountId: selectedChannel?.id || null,
+      accountName: selectedChannel?.title || null,
       accessToken: tokenData.access_token,
       refreshToken: tokenData.refresh_token || existing?.refreshToken || null,
+      metadata: {
+        googleAccountId: profile.sub || null,
+        googleAccountEmail: profile.email || null,
+        channelSelectionRequired: channels.length > 1,
+        availableChannels: channels.length > 1 ? channels : [],
+        channelId: selectedChannel?.id || null,
+        channelTitle: selectedChannel?.title || null,
+        channelCustomUrl: selectedChannel?.customUrl || null,
+        channelThumbnailUrl: selectedChannel?.thumbnailUrl || null,
+        uploadsPlaylistId: selectedChannel?.uploadsPlaylistId || null,
+      },
       expiresAt: tokenData.expires_in
         ? new Date(Date.now() + tokenData.expires_in * 1000)
         : null,
@@ -96,7 +152,7 @@ export async function GET(request: NextRequest) {
       await db.insert(socialAccounts).values(values);
     }
 
-    return redirectToFrontend('connected');
+    return redirectToFrontend(selectedChannel ? 'connected' : 'select');
   } catch (callbackError) {
     console.error('[YouTube Callback] Error:', callbackError);
     return redirectToFrontend('error', 'connection_failed');
