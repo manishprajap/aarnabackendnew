@@ -124,7 +124,7 @@ export async function POST(
       });
 
     const graphVersion =
-      process.env.META_GRAPH_VERSION || 'v24.0';
+      process.env.META_GRAPH_VERSION || 'v26.0';
     const authUrl =
       `https://www.facebook.com/${graphVersion}/dialog/oauth?${params.toString()}`;
 

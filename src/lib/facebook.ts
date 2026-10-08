@@ -1,5 +1,5 @@
 const GRAPH_VERSION =
-  process.env.META_GRAPH_VERSION || 'v24.0';
+  process.env.META_GRAPH_VERSION || 'v26.0';
 
 export function graphUrl(
   path: string
