@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { categories } from '@/db/schema';
-import { asc } from 'drizzle-orm';
+import { asc, count } from 'drizzle-orm';
+import { adminUnauthorized, isAdminRequest } from '@/lib/adminApi';
 
 /*
 |--------------------------------------------------------------------------
@@ -9,19 +10,32 @@ import { asc } from 'drizzle-orm';
 |--------------------------------------------------------------------------
 */
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
-    const allCategories = await db
-      .select()
-      .from(categories)
-      .orderBy(asc(categories.sortOrder));
+    const pageParam = req.nextUrl.searchParams.get('page');
+    if (pageParam === null) {
+      const allCategories = await db.select().from(categories).orderBy(asc(categories.sortOrder));
+      return NextResponse.json({ success: true, categories: allCategories });
+    }
 
-    return NextResponse.json({ success: true, categories: allCategories });
-  } catch (error: any) {
+    const page = Math.max(1, Number.parseInt(pageParam, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.nextUrl.searchParams.get('limit') || '20', 10) || 20));
+    const [allCategories, totalRows] = await Promise.all([
+      db.select().from(categories).orderBy(asc(categories.sortOrder)).limit(limit).offset((page - 1) * limit),
+      db.select({ total: count() }).from(categories),
+    ]);
+
+    const total = Number(totalRows[0]?.total || 0);
+    return NextResponse.json({
+      success: true,
+      categories: allCategories,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
     console.error('LIST CATEGORIES ERROR:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Failed to fetch categories' },
+      { success: false, message: error instanceof Error ? error.message : 'Failed to fetch categories' },
       { status: 500 }
     );
   }
@@ -34,6 +48,7 @@ export async function GET() {
 */
 
 export async function POST(req: NextRequest) {
+  if (!isAdminRequest(req)) return adminUnauthorized();
   try {
     const body = await req.json();
 
@@ -67,11 +82,11 @@ export async function POST(req: NextRequest) {
         isActive: true,
       },
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('CREATE CATEGORY ERROR:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Failed to create category' },
+      { success: false, message: error instanceof Error ? error.message : 'Failed to create category' },
       { status: 500 }
     );
   }

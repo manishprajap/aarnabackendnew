@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { adPresets } from '@/db/schema';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, count, eq, isNull, or } from 'drizzle-orm';
+import { adminUnauthorized, isAdminRequest } from '@/lib/adminApi';
 
 /*
 |--------------------------------------------------------------------------
@@ -15,22 +16,30 @@ export async function GET(req: NextRequest) {
     const categoryIdParam = req.nextUrl.searchParams.get('categoryId');
     const categoryId = categoryIdParam ? parseInt(categoryIdParam, 10) : null;
 
-    let rows = await db.select().from(adPresets).orderBy(asc(adPresets.sortOrder));
+    const pageParam = req.nextUrl.searchParams.get('page');
+    const filters = [];
+    if (group) filters.push(eq(adPresets.group, group));
+    if (categoryId !== null) filters.push(or(eq(adPresets.categoryId, categoryId), isNull(adPresets.categoryId))!);
+    const where = filters.length ? and(...filters) : undefined;
 
-    if (group) {
-      rows = rows.filter((p) => p.group === group);
+    if (pageParam === null) {
+      const rows = await db.select().from(adPresets).where(where).orderBy(asc(adPresets.sortOrder));
+      return NextResponse.json({ success: true, presets: rows });
     }
 
-    if (categoryId !== null) {
-      rows = rows.filter((p) => p.categoryId === categoryId || p.categoryId === null);
-    }
-
-    return NextResponse.json({ success: true, presets: rows });
-  } catch (error: any) {
+    const page = Math.max(1, Number.parseInt(pageParam, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.nextUrl.searchParams.get('limit') || '20', 10) || 20));
+    const [rows, totals] = await Promise.all([
+      db.select().from(adPresets).where(where).orderBy(asc(adPresets.sortOrder)).limit(limit).offset((page - 1) * limit),
+      db.select({ total: count() }).from(adPresets).where(where),
+    ]);
+    const total = Number(totals[0]?.total || 0);
+    return NextResponse.json({ success: true, presets: rows, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+  } catch (error) {
     console.error('LIST PRESETS ERROR:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Failed to fetch presets' },
+      { success: false, message: error instanceof Error ? error.message : 'Failed to fetch presets' },
       { status: 500 }
     );
   }
@@ -43,6 +52,7 @@ export async function GET(req: NextRequest) {
 */
 
 export async function POST(req: NextRequest) {
+  if (!isAdminRequest(req)) return adminUnauthorized();
   try {
     const body = await req.json();
 
@@ -100,11 +110,11 @@ export async function POST(req: NextRequest) {
     const newId = result.insertId;
 
     return NextResponse.json({ success: true, id: newId });
-  } catch (error: any) {
+  } catch (error) {
     console.error('CREATE PRESET ERROR:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Failed to create preset' },
+      { success: false, message: error instanceof Error ? error.message : 'Failed to create preset' },
       { status: 500 }
     );
   }

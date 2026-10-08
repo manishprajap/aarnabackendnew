@@ -22,6 +22,10 @@ import {
   getUserIdFromRequest,
   AuthError,
 } from '@/lib/auth';
+import {
+  getSubscriptionAccess,
+  subscriptionDeniedResponse,
+} from '@/lib/subscriptionAccess';
 
 import {
   decryptFacebookToken,
@@ -955,6 +959,10 @@ export async function POST(req: NextRequest) {
       throw error;
     }
 
+    const subscriptionAccess = await getSubscriptionAccess(userId);
+    if (!subscriptionAccess.allowed) {
+      return subscriptionDeniedResponse(subscriptionAccess);
+    }
 
     /* REQUEST BODY */
 

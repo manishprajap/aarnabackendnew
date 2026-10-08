@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { childCategories } from '@/db/schema';
 import { asc, eq } from 'drizzle-orm';
+import { adminUnauthorized, isAdminRequest } from '@/lib/adminApi';
 
 export async function GET(
   req: NextRequest,
@@ -35,6 +36,7 @@ export async function GET(
 }
 
 export async function POST(req: NextRequest) {
+  if (!isAdminRequest(req)) return adminUnauthorized();
   try {
     const body = await req.json();
     const { subcategoryId, name, sortOrder } = body;

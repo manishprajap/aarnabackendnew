@@ -21,6 +21,7 @@ import { db } from '@/db';
 import { socialAccounts } from '@/db/schema';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
 import { postToLinkedIn } from '@/lib/linkedin-targets';
+import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
 
 function parseMetadata(raw: unknown): Record<string, any> {
   if (!raw) return {};
@@ -36,6 +37,10 @@ function parseMetadata(raw: unknown): Record<string, any> {
 export async function POST(request: NextRequest) {
   try {
     const userId = getUserIdFromRequest(request);
+    const subscriptionAccess = await getSubscriptionAccess(userId);
+    if (!subscriptionAccess.allowed) {
+      return subscriptionDeniedResponse(subscriptionAccess);
+    }
 
     const body = await request.json().catch(() => ({}));
     const text = typeof body?.text === 'string' ? body.text.trim() : '';

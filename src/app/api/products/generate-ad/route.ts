@@ -7,6 +7,12 @@ import { db } from '@/db';
 import { products, adPresets, adSuggestions, adCreatives } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
+import { AuthError, getUserIdFromRequest } from '@/lib/auth';
+import {
+  getSubscriptionAccess,
+  reserveBannerGeneration,
+  subscriptionDeniedResponse,
+} from '@/lib/subscriptionAccess';
 
 import fs from 'fs/promises';
 import path from 'path';
@@ -117,6 +123,21 @@ export async function POST(req: NextRequest) {
   let creativeId: number | undefined;
 
   try {
+    let userId: number;
+    try {
+      userId = getUserIdFromRequest(req);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        return NextResponse.json({ success: false, message: error.message }, { status: 401 });
+      }
+      throw error;
+    }
+
+    const subscriptionAccess = await getSubscriptionAccess(userId);
+    if (!subscriptionAccess.allowed) {
+      return subscriptionDeniedResponse(subscriptionAccess);
+    }
+
     if (!process.env.GEMINI_API_KEY) {
       return NextResponse.json(
         { success: false, message: 'GEMINI_API_KEY is not configured' },
@@ -181,6 +202,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: 'Product not found' }, { status: 404 });
     }
     const product = productRows[0];
+    if (product.userId !== userId) {
+      return NextResponse.json({ success: false, message: 'Product does not belong to this account' }, { status: 403 });
+    }
 
     /*
     |------------------------------------------------------------------
@@ -288,7 +312,7 @@ export async function POST(req: NextRequest) {
     |------------------------------------------------------------------
     */
 
-    const insertResult = await db.insert(adCreatives).values({
+    const reservation = await reserveBannerGeneration(userId, {
       productId,
       presetId,
       presetKey: presetKeyValue || conceptTitle,
@@ -302,8 +326,10 @@ export async function POST(req: NextRequest) {
       logoImageUrl,
       status: 'processing',
     });
-
-    creativeId = (insertResult as any)[0]?.insertId as number;
+    if (!reservation.allowed) {
+      return subscriptionDeniedResponse(reservation.access);
+    }
+    creativeId = reservation.creativeId;
 
     const prompt = buildAdPrompt({
       product,

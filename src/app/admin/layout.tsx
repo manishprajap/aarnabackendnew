@@ -66,9 +66,11 @@ function LogoutIcon() {
 
 const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard', href: '/admin', icon: <DashboardIcon /> },
-  { label: 'Categories', href: '/admin/manage?tab=category', icon: <CategoryIcon /> },
-  { label: 'Subcategories', href: '/admin/manage?tab=subcategory', icon: <SubcategoryIcon /> },
-  { label: 'Prompts', href: '/admin/manage?tab=preset', icon: <PromptIcon /> },
+  { label: 'Categories', href: '/admin/categories', icon: <CategoryIcon /> },
+  { label: 'Subcategories', href: '/admin/subcategories', icon: <SubcategoryIcon /> },
+  { label: 'Child categories', href: '/admin/childcategories', icon: <SubcategoryIcon /> },
+  { label: 'Prompts', href: '/admin/prompts', icon: <PromptIcon /> },
+  { label: 'Plans & coupons', href: '/admin/billing', icon: <DashboardIcon /> },
   { label: 'Vendors', href: '/admin/vendors', icon: <VendorsIcon /> },
 ];
 

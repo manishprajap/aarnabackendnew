@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { subcategories } from '@/db/schema';
-import { asc, eq } from 'drizzle-orm';
+import { asc, count, eq } from 'drizzle-orm';
+import { adminUnauthorized, isAdminRequest } from '@/lib/adminApi';
 
 /*
 |--------------------------------------------------------------------------
@@ -13,17 +14,30 @@ export async function GET(req: NextRequest) {
   try {
     const categoryIdParam = req.nextUrl.searchParams.get('categoryId');
     const categoryId = categoryIdParam ? parseInt(categoryIdParam, 10) : null;
+    const pageParam = req.nextUrl.searchParams.get('page');
 
     const query = db.select().from(subcategories).orderBy(asc(subcategories.sortOrder));
 
-    const rows = categoryId !== null ? await query.where(eq(subcategories.categoryId, categoryId)) : await query;
+    if (pageParam === null) {
+      const rows = categoryId !== null ? await query.where(eq(subcategories.categoryId, categoryId)) : await query;
+      return NextResponse.json({ success: true, subcategories: rows });
+    }
 
-    return NextResponse.json({ success: true, subcategories: rows });
-  } catch (error: any) {
+    const page = Math.max(1, Number.parseInt(pageParam, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.nextUrl.searchParams.get('limit') || '20', 10) || 20));
+    const where = categoryId !== null ? eq(subcategories.categoryId, categoryId) : undefined;
+    const [rows, totalRows] = await Promise.all([
+      db.select().from(subcategories).where(where).orderBy(asc(subcategories.sortOrder)).limit(limit).offset((page - 1) * limit),
+      db.select({ total: count() }).from(subcategories).where(where),
+    ]);
+
+    const total = Number(totalRows[0]?.total || 0);
+    return NextResponse.json({ success: true, subcategories: rows, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+  } catch (error) {
     console.error('LIST SUBCATEGORIES ERROR:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Failed to fetch subcategories' },
+      { success: false, message: error instanceof Error ? error.message : 'Failed to fetch subcategories' },
       { status: 500 }
     );
   }
@@ -36,6 +50,7 @@ export async function GET(req: NextRequest) {
 */
 
 export async function POST(req: NextRequest) {
+  if (!isAdminRequest(req)) return adminUnauthorized();
   try {
     const body = await req.json();
 
@@ -83,11 +98,11 @@ export async function POST(req: NextRequest) {
         sortOrder: typeof sortOrder === 'number' ? sortOrder : 0,
       },
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('CREATE SUBCATEGORY ERROR:', error);
 
     return NextResponse.json(
-      { success: false, message: error?.message || 'Failed to create subcategory' },
+      { success: false, message: error instanceof Error ? error.message : 'Failed to create subcategory' },
       { status: 500 }
     );
   }

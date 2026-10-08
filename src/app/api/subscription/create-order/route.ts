@@ -3,10 +3,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
 import { plans, subscriptions, transactions } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { corsHeaders } from '@/lib/cors';
 import { razorpay, razorpayKeyId } from '@/lib/razorpay';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
+import { CouponValidationError, getValidCouponDiscount } from '@/lib/coupons';
 
 // Wraps NextResponse.json so every response — not just OPTIONS — carries
 // the CORS headers.
@@ -25,19 +26,30 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const planId = Number(body?.planId);
+    const couponCode = typeof body?.couponCode === 'string' ? body.couponCode : '';
 
     if (!planId || Number.isNaN(planId)) {
       return json({ error: 'planId is required' }, 400);
     }
 
-    const [plan] = await db.select().from(plans).where(eq(plans.id, planId)).limit(1);
+    const [plan] = await db
+      .select()
+      .from(plans)
+      .where(and(eq(plans.id, planId), eq(plans.isActive, true)))
+      .limit(1);
 
     if (!plan) {
       return json({ error: 'Plan not found' }, 404);
     }
 
-    // Razorpay amounts are in the smallest currency unit (paise for INR).
-    const amountInPaise = plan.price * 100;
+    let couponId: number | null = null;
+    let discountAmount = 0;
+    if (couponCode.trim()) {
+      const couponResult = await getValidCouponDiscount(planId, couponCode);
+      couponId = couponResult.coupon!.id;
+      discountAmount = couponResult.discountPaise;
+    }
+    const amountInPaise = plan.price * 100 - discountAmount;
 
     const order = await razorpay.orders.create({
       amount: amountInPaise,
@@ -46,6 +58,7 @@ export async function POST(req: NextRequest) {
       notes: {
         userId: String(userId),
         planId: String(planId),
+        couponCode: couponCode.trim().toUpperCase(),
       },
     });
 
@@ -65,6 +78,8 @@ export async function POST(req: NextRequest) {
       subscriptionId,
       razorpayOrderId: order.id,
       amount: amountInPaise,
+      couponId,
+      discountAmount,
       currency: 'INR',
       status: 'created',
     });
@@ -76,10 +91,15 @@ export async function POST(req: NextRequest) {
       keyId: razorpayKeyId, // trimmed: never send the raw env value to the browser
       planId,
       subscriptionId,
+      originalAmount: plan.price * 100,
+      discountAmount,
     });
   } catch (e) {
     if (e instanceof AuthError) {
       return json({ error: e.message }, 401);
+    }
+    if (e instanceof CouponValidationError) {
+      return json({ error: e.message }, 400);
     }
     console.error('create-order error:', e);
     return json({ error: 'Could not create order' }, 500);

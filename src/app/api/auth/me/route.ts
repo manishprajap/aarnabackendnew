@@ -1,9 +1,10 @@
 // src/app/api/auth/me/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { eq, and, gt, desc } from 'drizzle-orm';
+import { eq, and, desc, gte } from 'drizzle-orm';
 import { db } from '@/db';
-import { users, subscriptions } from '@/db/schema';
+import { users, subscriptions, plans } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
+import { getSubscriptionAccess } from '@/lib/subscriptionAccess';
 
 export const runtime = 'nodejs';
 
@@ -63,13 +64,20 @@ export async function GET(req: NextRequest) {
     }
 
     const [activeSub] = await db
-      .select({ id: subscriptions.id })
+      .select({
+        id: subscriptions.id,
+        endDate: subscriptions.endDate,
+        startDate: subscriptions.startDate,
+        planName: plans.name,
+        monthlyLimit: plans.posters,
+      })
       .from(subscriptions)
+      .innerJoin(plans, eq(subscriptions.planId, plans.id))
       .where(
         and(
           eq(subscriptions.userId, row.id),
           eq(subscriptions.status, 'active'),
-          gt(subscriptions.endDate, new Date())
+          gte(subscriptions.endDate, new Date())
         )
       )
       .orderBy(desc(subscriptions.endDate))
@@ -78,11 +86,28 @@ export async function GET(req: NextRequest) {
     // Same rule as GET /api/business
     const hasBusiness = Boolean(row.businessName && row.businessCategoryId);
     const hasSubscription = Boolean(activeSub);
+    const subscriptionAccess = hasSubscription
+      ? await getSubscriptionAccess(row.id)
+      : null;
+    const daysRemaining = activeSub?.endDate
+      ? Math.max(0, Math.ceil((activeSub.endDate.getTime() - Date.now()) / 86_400_000))
+      : null;
 
     return json({
       user: row,
       hasBusiness,
       hasSubscription,
+      subscription: activeSub
+        ? {
+            planName: activeSub.planName,
+            startDate: activeSub.startDate,
+            endDate: activeSub.endDate,
+            daysRemaining,
+            monthlyLimit: activeSub.monthlyLimit,
+            used: subscriptionAccess?.allowed ? subscriptionAccess.used : subscriptionAccess?.used ?? 0,
+            remaining: subscriptionAccess?.allowed ? subscriptionAccess.remaining : 0,
+          }
+        : null,
     });
   } catch (error) {
     console.error('[auth/me] Unexpected error:', error);

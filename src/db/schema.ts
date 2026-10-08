@@ -267,6 +267,18 @@ export const adCreativesRelations = relations(adCreatives, ({ one }) => ({
    PLANS / SUBSCRIPTIONS / TRANSACTIONS
 ========================================================= */
 
+export const coupons = mysqlTable('coupons', {
+  id: int('id').autoincrement().primaryKey(),
+  code: varchar('code', { length: 64 }).notNull().unique(),
+  discountType: mysqlEnum('discount_type', ['percent', 'fixed']).notNull(),
+  discountValue: int('discount_value').notNull(),
+  startsAt: datetime('starts_at', { mode: 'date' }),
+  endsAt: datetime('ends_at', { mode: 'date' }),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
+});
+
 // `durationDays` lets the subscription API compute a subscription's endDate.
 export const plans = mysqlTable('plans', {
   id: int('id').autoincrement().primaryKey(),
@@ -275,6 +287,7 @@ export const plans = mysqlTable('plans', {
   posters: int('posters').notNull(),
   features: text('features'),
   durationDays: int('duration_days').notNull().default(30),
+  isActive: boolean('is_active').notNull().default(true),
 });
 
 // One row per plan period a user has purchased/is on. The currently active
@@ -304,6 +317,8 @@ export const transactions = mysqlTable(
     razorpayOrderId: varchar('razorpay_order_id', { length: 100 }).notNull(),
     razorpayPaymentId: varchar('razorpay_payment_id', { length: 100 }),
     razorpaySignature: varchar('razorpay_signature', { length: 255 }),
+    couponId: int('coupon_id').references(() => coupons.id, { onDelete: 'set null' }),
+    discountAmount: int('discount_amount').notNull().default(0),
 
     amount: int('amount').notNull(), // stored in paise (₹1 = 100)
     currency: varchar('currency', { length: 10 }).notNull().default('INR'),
