@@ -319,10 +319,14 @@ async function publishYouTubeVideo(
 
   let token = connection.accessToken;
   if (connection.expiresAt && connection.expiresAt.getTime() <= Date.now() + 60_000) {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    if (!connection.refreshToken || !clientId || !clientSecret) {
-      throw new Error('YouTube authorization expired. Reconnect your account.');
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+    if (!connection.refreshToken) {
+      throw new Error('No YouTube refresh token is saved. Reconnect YouTube from Manage connected accounts.');
+    }
+    if (!clientId || !clientSecret) {
+      console.error('[Video Publish] Google OAuth client credentials are missing.');
+      throw new Error('YouTube token refresh is not configured. Contact the administrator.');
     }
     const refreshResponse = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
@@ -337,12 +341,30 @@ async function publishYouTubeVideo(
     });
     const refreshed = await responseJson(refreshResponse);
     if (!refreshResponse.ok || typeof refreshed.access_token !== 'string') {
-      throw new Error('YouTube authorization expired. Reconnect your account.');
+      const errorCode = typeof refreshed.error === 'string' ? refreshed.error : '';
+      const description = typeof refreshed.error_description === 'string'
+        ? refreshed.error_description
+        : '';
+      console.error('[Video Publish] YouTube token refresh failed:', {
+        status: refreshResponse.status,
+        error: errorCode,
+        description,
+      });
+      if (errorCode === 'invalid_grant') {
+        throw new Error('Google rejected the saved YouTube authorization. Reconnect YouTube from Manage connected accounts.');
+      }
+      if (errorCode === 'invalid_client') {
+        throw new Error('YouTube OAuth credentials are invalid. Contact the administrator.');
+      }
+      throw new Error(description || 'YouTube token refresh failed. Reconnect YouTube from Manage connected accounts.');
     }
     token = refreshed.access_token;
     await db.update(socialAccounts).set({
       accessToken: token,
       expiresAt: new Date(Date.now() + Number(refreshed.expires_in || 3600) * 1000),
+      ...(typeof refreshed.refresh_token === 'string'
+        ? { refreshToken: refreshed.refresh_token }
+        : {}),
     }).where(eq(socialAccounts.id, connection.id));
   }
 
