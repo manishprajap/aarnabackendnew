@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "db:repair-registration-billing": "node --env-file=.env scripts/repair-registration-billing-schema.mjs",
     "lint": "eslint"
   },
   "dependencies": {

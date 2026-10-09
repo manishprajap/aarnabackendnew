@@ -114,3 +114,9 @@ For Gmail, enable 2-Step Verification and use a Google App Password; do not use 
 Alternatively, use Resend with `MAIL_DRIVER=resend`, `RESEND_API_KEY`, and `EMAIL_FROM` (or `FROM_EMAIL`) from a verified sender domain. Development can use the returned `devOtp` when mail settings are omitted; production refuses to issue an OTP if email delivery is not configured.
 
 Apply `drizzle/0007_email_otp_basic_plan.sql` after the earlier billing migrations. It adds the registration email to OTP records, ensures plan duration is present, and seeds a 30-day Basic Plan for ₹999 with 30 banner generations.
+
+### Repairing an existing production schema
+
+If the deployed database has an undersized `otps.email` column or is missing billing columns, take a database backup first, then run `npm run db:repair-registration-billing` from the backend directory with the production `DATABASE_URL` available in `.env`. This idempotent repair widens `otps.email` to 191 characters and ensures plan/coupon transaction columns and their coupon relation exist. It does not delete existing rows or change transaction amounts. It stops rather than adding the coupon foreign key if existing coupon references are invalid.
+
+Transaction `amount` and `discount_amount` are integer paise values, matching Razorpay's API (`₹599 = 59900 paise`). Plan prices are stored in rupees; conversion happens when creating the Razorpay order. Convert to rupees only for display, not when creating or verifying a payment.

@@ -26,6 +26,12 @@ function escapeHtml(value: string) {
   })[character] || character);
 }
 
+function brandedSender(value: string) {
+  const sender = value.trim();
+  if (sender.includes('<')) return sender;
+  return `AarnexAi <${sender}>`;
+}
+
 function getMailConfig() {
   const driver = process.env.MAIL_DRIVER?.trim().toLowerCase();
   const resendApiKey = process.env.RESEND_API_KEY?.trim();
@@ -43,17 +49,17 @@ function getMailConfig() {
 
   if (driver === 'smtp') {
     return smtpConfigured
-      ? { driver: 'smtp' as const, host: smtpHost!, port: smtpPort, user: smtpUser!, password: smtpPassword!, encryption: smtpEncryption || 'tls', from: smtpFrom! }
+      ? { driver: 'smtp' as const, host: smtpHost!, port: smtpPort, user: smtpUser!, password: smtpPassword!, encryption: smtpEncryption || 'tls', from: brandedSender(smtpFrom!) }
       : null;
   }
   if (driver && driver !== 'resend') return null;
   if (driver === 'resend' || (!driver && resendApiKey && resendFrom)) {
     return resendApiKey && resendFrom
-      ? { driver: 'resend' as const, apiKey: resendApiKey, from: resendFrom }
+      ? { driver: 'resend' as const, apiKey: resendApiKey, from: brandedSender(resendFrom) }
       : null;
   }
   if (!driver && smtpConfigured) {
-    return { driver: 'smtp' as const, host: smtpHost!, port: smtpPort, user: smtpUser!, password: smtpPassword!, encryption: smtpEncryption || 'tls', from: smtpFrom! };
+    return { driver: 'smtp' as const, host: smtpHost!, port: smtpPort, user: smtpUser!, password: smtpPassword!, encryption: smtpEncryption || 'tls', from: brandedSender(smtpFrom!) };
   }
   return null;
 }
@@ -72,9 +78,9 @@ async function sendSmtpEmail(config: Extract<NonNullable<ReturnType<typeof getMa
   await transporter.sendMail({
     from: message.from,
     to: message.to,
-    subject: 'Your Aarna verification code',
-    text: `Hello ${message.name},\n\nYour Aarna verification code is ${message.otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your Aarna account</h2><p>Hello ${escapeHtml(message.name)},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${message.otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
+    subject: 'Your AarnexAi verification code',
+    text: `Hello ${message.name},\n\nYour AarnexAi verification code is ${message.otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your AarnexAi account</h2><p>Hello ${escapeHtml(message.name)},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${message.otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
   });
 }
 
@@ -88,9 +94,9 @@ async function sendResendEmail(config: Extract<NonNullable<ReturnType<typeof get
     body: JSON.stringify({
       from: message.from,
       to: [message.to],
-      subject: 'Your Aarna verification code',
-      text: `Hello ${message.name},\n\nYour Aarna verification code is ${message.otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
-      html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your Aarna account</h2><p>Hello ${escapeHtml(message.name)},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${message.otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
+      subject: 'Your AarnexAi verification code',
+      text: `Hello ${message.name},\n\nYour AarnexAi verification code is ${message.otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your AarnexAi account</h2><p>Hello ${escapeHtml(message.name)},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${message.otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
     }),
     cache: 'no-store',
   });
@@ -196,7 +202,14 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, message: 'Verification code sent to your email.' });
   } catch (error) {
-    console.error('[Registration OTP] Could not send verification code:', error);
+    const failure = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+    const cause = failure.cause && typeof failure.cause === 'object'
+      ? failure.cause as Record<string, unknown>
+      : {};
+    console.error('[Registration OTP] Could not send verification code:', {
+      code: cause.code ?? failure.code ?? 'UNKNOWN',
+      message: cause.sqlMessage ?? cause.message ?? failure.message ?? 'Unknown database or email error',
+    });
     return NextResponse.json(
       { success: false, message: 'Could not send the verification code. Please try again.' },
       { status: 500 },
