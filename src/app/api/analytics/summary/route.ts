@@ -72,6 +72,13 @@ function getErrorMessage(data: any, fallback: string): string {
   return data?.error?.message || data?.error_message || data?.message || fallback;
 }
 
+function normalizeInstagramError(message: string): string {
+  if (/unsupported get request|does not exist, cannot be loaded|missing permissions/i.test(message)) {
+    return "Instagram could not access this post's insights. Reconnect the correct professional account and grant Instagram insights permission.";
+  }
+  return message;
+}
+
 function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
@@ -133,7 +140,9 @@ async function fetchInstagramMediaInsights(mediaId: string, accessToken: string)
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'Instagram insights request failed'));
+    throw new Error(
+      normalizeInstagramError(getErrorMessage(data, 'Instagram insights request failed'))
+    );
   }
 
   const byName: Record<string, number> = {};
@@ -472,9 +481,11 @@ export async function GET(req: NextRequest) {
 
         const failure = firstFailure(results);
         if (failure) {
-          console.warn('[AnalyticsSummary] instagram:', failure);
+          if (!/Instagram could not access this post's insights/i.test(failure)) {
+            console.warn('[AnalyticsSummary] instagram:', failure);
+          }
           if (out.impressions === null) {
-            out.note = 'Instagram insights are unavailable for your published posts right now.';
+            out.note = failure;
           }
         }
       }
