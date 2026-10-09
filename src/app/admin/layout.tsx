@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense } from 'react';
-import { usePathname, useSearchParams } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { NEXT_PUBLIC_BASE_PATH, API_URL } from '@/lib/config';
 
 interface NavItem {
@@ -21,18 +21,11 @@ function DashboardIcon() {
   );
 }
 
-function CategoryIcon() {
+function SetupIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 6h16M4 12h16M4 18h10" />
-    </svg>
-  );
-}
-
-function SubcategoryIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M7 4v16M7 4h10a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H7M7 15h6a2 2 0 0 1 2 2v3" />
+      <path d="M4 5h16v14H4zM8 9h8M8 13h5" />
+      <path d="m16 16 1.5 1.5L20 15" />
     </svg>
   );
 }
@@ -84,9 +77,8 @@ function LogoutIcon() {
 
 const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard', href: '/admin', icon: <DashboardIcon /> },
-  { label: 'Categories', href: '/admin/manage?tab=category', icon: <CategoryIcon /> },
-  { label: 'Subcategories', href: '/admin/manage?tab=subcategory', icon: <SubcategoryIcon /> },
-  { label: 'Prompts', href: '/admin/manage?tab=preset', icon: <PromptIcon /> },
+  { label: 'Business Setup', href: '/admin/business-setup', icon: <SetupIcon /> },
+  { label: 'Prompts', href: '/admin/prompts', icon: <PromptIcon /> },
   { label: 'Vendors', href: '/admin/vendors', icon: <VendorsIcon /> },
   { label: 'Billing', href: '/admin/billing', icon: <BillingIcon /> },
   { label: 'Transactions', href: '/admin/transactions', icon: <TransactionsIcon /> },
@@ -97,12 +89,7 @@ const NAV_ITEMS: NavItem[] = [
 | Active-item detection
 |--------------------------------------------------------------------------
 |
-| All three "manage" nav items share the same base path
-| (/admin/manage) and differ only by the ?tab= query, so matching on
-| pathname alone would highlight all three at once. We also compare
-| the tab query value.
-|
-| NOTE: NAV_ITEMS.href intentionally stays UNPREFIXED (no
+| NAV_ITEMS.href intentionally stays UNPREFIXED (no
 | NEXT_PUBLIC_BASE_PATH). usePathname() from next/navigation already
 | strips the configured basePath automatically, so comparing against
 | unprefixed paths here is correct. The prefix is only added at the
@@ -142,12 +129,13 @@ function isNavItemActive(
 
 function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const currentTab = searchParams.get('tab');
 
   const handleLogout = async () => {
     await fetch(`${API_URL}/admin/logout`, { method: 'POST' });
-    window.location.href = `${NEXT_PUBLIC_BASE_PATH}/login`;
+    router.push('/login');
   };
 
   const activeItem =

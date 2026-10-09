@@ -4,9 +4,11 @@ import { useEffect, useState } from 'react';
 import { NEXT_PUBLIC_BASE_PATH, API_URL } from '@/lib/config';
 
 interface Counts {
-  categories: number;
-  subcategories: number;
-  presets: number;
+  industries: number;
+  businessCategories: number;
+  services: number;
+  targetCustomers: number;
+  strategies: number;
 }
 
 interface Overview {
@@ -22,18 +24,11 @@ interface Overview {
 
 type CountKey = keyof Counts;
 
-function CategoryIcon() {
+function SetupIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 6h16M4 12h16M4 18h10" />
-    </svg>
-  );
-}
-
-function SubcategoryIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M7 4v16M7 4h10a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H7M7 15h6a2 2 0 0 1 2 2v3" />
+      <path d="M4 5h16v14H4zM8 9h8M8 13h5" />
+      <path d="m16 16 1.5 1.5L20 15" />
     </svg>
   );
 }
@@ -68,33 +63,43 @@ const INVENTORY: {
   key: CountKey;
   label: string;
   detail: string;
-  tab: string;
   icon: React.ReactNode;
   accent: string;
 }[] = [
   {
-    key: 'categories',
-    label: 'Categories',
-    detail: 'Top-level business types',
-    tab: 'category',
-    icon: <CategoryIcon />,
+    key: 'industries',
+    label: 'Industries',
+    detail: 'Business sectors selected during setup',
+    icon: <SetupIcon />,
     accent: 'bg-emerald-50 text-emerald-700',
   },
   {
-    key: 'subcategories',
-    label: 'Subcategories',
-    detail: 'Specialties under each category',
-    tab: 'subcategory',
-    icon: <SubcategoryIcon />,
+    key: 'businessCategories',
+    label: 'Business categories',
+    detail: 'Business types under each industry',
+    icon: <SetupIcon />,
     accent: 'bg-sky-50 text-sky-700',
   },
   {
-    key: 'presets',
-    label: 'Creative prompts',
-    detail: 'Styles and creative formats',
-    tab: 'preset',
-    icon: <PromptIcon />,
+    key: 'services',
+    label: 'Products / services',
+    detail: 'Offerings selected by the business',
+    icon: <SetupIcon />,
+    accent: 'bg-violet-50 text-violet-700',
+  },
+  {
+    key: 'targetCustomers',
+    label: 'Target customers',
+    detail: 'Audiences selected during setup',
+    icon: <SetupIcon />,
     accent: 'bg-amber-50 text-amber-700',
+  },
+  {
+    key: 'strategies',
+    label: 'Marketing strategies',
+    detail: 'Manual promotion choices',
+    icon: <PromptIcon />,
+    accent: 'bg-rose-50 text-rose-700',
   },
 ];
 
@@ -115,9 +120,7 @@ const AdminDashboardPage: React.FC = () => {
 
       try {
         const responses = await Promise.all([
-          fetch(`${API_URL}/categories`, { cache: 'no-store' }),
-          fetch(`${API_URL}/subcategories`, { cache: 'no-store' }),
-          fetch(`${API_URL}/presets`, { cache: 'no-store' }),
+          fetch(`${API_URL}/admin/business-setup-catalog`, { cache: 'no-store', credentials: 'include' }),
           fetch(`${API_URL}/admin/overview`, { cache: 'no-store', credentials: 'include' }),
         ]);
 
@@ -125,19 +128,22 @@ const AdminDashboardPage: React.FC = () => {
           throw new Error('Could not load all dashboard data. Refresh to try again.');
         }
 
-        const [categoryData, subcategoryData, presetData, overviewData] = await Promise.all(
+        const [catalogData, overviewData] = await Promise.all(
           responses.map((response) => response.json())
         );
 
-        if (!categoryData.success || !subcategoryData.success || !presetData.success || !overviewData.success) {
+        if (!catalogData.success || !overviewData.success) {
           throw new Error('Could not load all dashboard data. Refresh to try again.');
         }
 
         if (isCurrent) {
+          const catalog = catalogData.catalog;
           setCounts({
-            categories: categoryData.categories?.length ?? 0,
-            subcategories: subcategoryData.subcategories?.length ?? 0,
-            presets: presetData.presets?.length ?? 0,
+            industries: catalog.industries?.length ?? 0,
+            businessCategories: catalog.businessCategories?.length ?? 0,
+            services: catalog.services?.length ?? 0,
+            targetCustomers: catalog.targetCustomers?.length ?? 0,
+            strategies: catalog.strategies?.length ?? 0,
           });
           setOverview(overviewData.overview);
           setUpdatedAt(new Date());
@@ -159,7 +165,7 @@ const AdminDashboardPage: React.FC = () => {
 
   const inventoryRows = INVENTORY.map((item) => {
     const configured = counts ? counts[item.key] > 0 : false;
-    const href = `${NEXT_PUBLIC_BASE_PATH}/admin/manage?tab=${item.tab}`;
+    const href = `${NEXT_PUBLIC_BASE_PATH}/admin/business-setup`;
 
     return (
       <div key={item.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-slate-100 py-4 last:border-0 sm:grid-cols-[minmax(0,1fr)_90px_116px]">
@@ -185,7 +191,7 @@ const AdminDashboardPage: React.FC = () => {
           href={href}
           className="col-span-2 inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-700 transition-colors hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 sm:col-span-1"
         >
-          Manage
+          Manage / Add
           <span className="[&>svg]:h-3.5 [&>svg]:w-3.5"><ArrowRightIcon /></span>
         </a>
       </div>
@@ -199,7 +205,7 @@ const AdminDashboardPage: React.FC = () => {
           <p className="mb-2 text-xs font-semibold uppercase text-emerald-800">Admin / Overview</p>
           <h1 className="text-3xl font-semibold text-slate-950">Control room</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-            Manage the content configuration that powers product categories and ad creative generation.
+            Manage the business setup options that users select during onboarding.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -295,9 +301,9 @@ const AdminDashboardPage: React.FC = () => {
 
         <aside className="rounded-lg bg-slate-950 p-5 text-white sm:p-6">
           <p className="text-xs font-semibold uppercase text-emerald-300">Workflow</p>
-          <h2 className="mt-2 text-lg font-semibold">Creative setup</h2>
+          <h2 className="mt-2 text-lg font-semibold">Business onboarding</h2>
           <p className="mt-2 text-sm leading-6 text-slate-300">
-            Keep these three layers aligned so each business can get relevant ad concepts.
+            Keep the setup options aligned so businesses can choose relevant details.
           </p>
           <ol className="mt-6 space-y-0">
             {INVENTORY.map((item, index) => (

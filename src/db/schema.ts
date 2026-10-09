@@ -280,6 +280,24 @@ export const coupons = mysqlTable('coupons', {
   updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
 });
 
+export const homeContent = mysqlTable('home_content', {
+  id: bigint('id', { mode: 'number', unsigned: true }).autoincrement().primaryKey(),
+  contentType: mysqlEnum('content_type', ['banner', 'news']).notNull(),
+  title: varchar('title', { length: 255 }).notNull(),
+  description: text('description'),
+  mediaUrl: varchar('media_url', { length: 1000 }),
+  mediaType: mysqlEnum('media_type', ['image', 'video', 'text']).notNull().default('text'),
+  buttonText: varchar('button_text', { length: 100 }),
+  buttonUrl: varchar('button_url', { length: 1000 }),
+  displayOrder: int('display_order').notNull().default(0),
+  isActive: boolean('is_active').notNull().default(true),
+  startDate: datetime('start_date'),
+  endDate: datetime('end_date'),
+  createdBy: bigint('created_by', { mode: 'number', unsigned: true }),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
+});
+
 // `durationDays` lets the subscription API compute a subscription's endDate.
 export const plans = mysqlTable('plans', {
   id: int('id').autoincrement().primaryKey(),

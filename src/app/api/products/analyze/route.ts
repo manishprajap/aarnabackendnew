@@ -5,9 +5,8 @@ import { db } from '@/db';
 import {
   products,
   banners,
-  categories,
-  subcategories,
-  childCategories,
+  users,
+  businessCategories,
 } from '@/db/schema';
 import { corsHeaders } from '@/lib/cors';
 import { eq } from 'drizzle-orm';
@@ -41,8 +40,6 @@ const MAX_PROMPT_LENGTH = 500;
 
 interface BannerOptions {
   categoryName: string | null;
-  subcategoryName: string | null;
-  childCategoryName: string | null;
   userPrompt: string | null;
   bannerColor: string | null;
   promptType: string | null;
@@ -79,26 +76,6 @@ export async function OPTIONS(req: NextRequest) {
 | Small helpers
 |--------------------------------------------------------------------------
 */
-
-type ParsedId = { value: number | null; error: string | null };
-
-// Optional numeric id coming from the JSON body (number or numeric string).
-//   missing / null / ""  -> { value: null, error: null }
-//   valid                -> { value: 12,   error: null }
-//   invalid              -> { value: null, error: '<label> must be a valid number' }
-function parseOptionalId(raw: unknown, label: string): ParsedId {
-  if (raw === undefined || raw === null || raw === '') {
-    return { value: null, error: null };
-  }
-
-  const n = Number(raw);
-
-  if (!Number.isInteger(n) || n <= 0) {
-    return { value: null, error: `${label} must be a valid number` };
-  }
-
-  return { value: n, error: null };
-}
 
 const isAspectRatio = (value: unknown): value is AspectRatio =>
   typeof value === 'string' && (ALLOWED_ASPECT_RATIOS as string[]).includes(value);
@@ -216,15 +193,7 @@ function buildCreativePrompt(aiData: any, options: BannerOptions): string {
       ? aiData.features.slice(0, 3).join(', ')
       : '';
 
-  const categoryPath = [
-    options.categoryName,
-    options.subcategoryName,
-    options.childCategoryName,
-  ]
-    .filter(Boolean)
-    .join(' > ');
-
-  const categoryLine = categoryPath ? `Category: ${categoryPath}.` : '';
+  const categoryLine = options.categoryName ? `Business category: ${options.categoryName}.` : '';
 
   const brandColorLine = options.bannerColor
     ? `Use ${options.bannerColor} as the dominant accent/background color for text, badges, or backdrop elements — keep it tasteful and premium, not overpowering the product.`
@@ -503,9 +472,6 @@ async function generateCreativeBanner(
 | Body:
 | {
 |   productId,                 // required
-|   categoryId,                // optional (main business category)
-|   subcategoryId,             // optional
-|   childCategoryId,           // optional
 |   aspectRatio,               // optional: "1:1" | "4:5" | "9:16" | "16:9"
 |   promptDescription          // optional, max 500 chars
 | }
@@ -564,27 +530,6 @@ export async function POST(req: NextRequest) {
     }
 
     productId = parsedProductId;
-
-    /*
-    |--------------------------------------------------------------------------
-    | Read + validate the selections sent from the "Generate Ad" screen
-    |--------------------------------------------------------------------------
-    */
-
-    const categoryParsed = parseOptionalId(body?.categoryId, 'categoryId');
-    if (categoryParsed.error) {
-      return json({ success: false, message: categoryParsed.error }, { status: 400 });
-    }
-
-    const subcategoryParsed = parseOptionalId(body?.subcategoryId, 'subcategoryId');
-    if (subcategoryParsed.error) {
-      return json({ success: false, message: subcategoryParsed.error }, { status: 400 });
-    }
-
-    const childCategoryParsed = parseOptionalId(body?.childCategoryId, 'childCategoryId');
-    if (childCategoryParsed.error) {
-      return json({ success: false, message: childCategoryParsed.error }, { status: 400 });
-    }
 
     let aspectRatioInput: AspectRatio | null = null;
 
@@ -648,18 +593,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Effective selections: request body wins, otherwise whatever was saved
-    | on the product row at upload time.
-    |--------------------------------------------------------------------------
-    */
-
-    const categoryId: number | null = categoryParsed.value ?? product.categoryId ?? null;
-    const subcategoryId: number | null = subcategoryParsed.value ?? product.subcategoryId ?? null;
-    const childCategoryId: number | null =
-      childCategoryParsed.value ?? product.childCategoryId ?? null;
-
     const aspectRatio: AspectRatio =
       aspectRatioInput ??
       (isAspectRatio(product.aspectRatio) ? product.aspectRatio : DEFAULT_ASPECT_RATIO);
@@ -668,76 +601,13 @@ export async function POST(req: NextRequest) {
     const bannerColor: string | null = product.bannerColor || null;
     const promptType: string | null = product.promptType || null;
 
-    /*
-    |--------------------------------------------------------------------------
-    | Resolve + validate category / subcategory / child category
-    | (subcategory must belong to the category, child to the subcategory)
-    |--------------------------------------------------------------------------
-    */
-
-    let categoryName: string | null = null;
-    let subcategoryName: string | null = null;
-    let childCategoryName: string | null = null;
-
-    if (categoryId) {
-      const categoryRows = await db
-        .select()
-        .from(categories)
-        .where(eq(categories.id, categoryId))
-        .limit(1);
-
-      if (!categoryRows.length) {
-        return json({ success: false, message: 'Invalid category' }, { status: 400 });
-      }
-
-      categoryName = (categoryRows[0] as any).name ?? null;
-    }
-
-    if (subcategoryId) {
-      const subcategoryRows = await db
-        .select()
-        .from(subcategories)
-        .where(eq(subcategories.id, subcategoryId))
-        .limit(1);
-
-      if (!subcategoryRows.length) {
-        return json({ success: false, message: 'Invalid subcategory' }, { status: 400 });
-      }
-
-      const sub = subcategoryRows[0] as any;
-
-      if (sub.categoryId !== categoryId) {
-        return json(
-          { success: false, message: 'Subcategory does not belong to the selected category' },
-          { status: 400 }
-        );
-      }
-
-      subcategoryName = sub.name ?? null;
-    }
-
-    if (childCategoryId) {
-      const childCategoryRows = await db
-        .select()
-        .from(childCategories)
-        .where(eq(childCategories.id, childCategoryId))
-        .limit(1);
-
-      if (!childCategoryRows.length) {
-        return json({ success: false, message: 'Invalid child category' }, { status: 400 });
-      }
-
-      const child = childCategoryRows[0] as any;
-
-      if (child.subcategoryId !== subcategoryId) {
-        return json(
-          { success: false, message: 'Child category does not belong to the selected subcategory' },
-          { status: 400 }
-        );
-      }
-
-      childCategoryName = child.name ?? null;
-    }
+    const businessCategoryRows = await db
+      .select({ name: businessCategories.name })
+      .from(users)
+      .innerJoin(businessCategories, eq(users.businessCategoryId, businessCategories.id))
+      .where(eq(users.id, product.userId))
+      .limit(1);
+    const businessCategoryName = businessCategoryRows[0]?.name ?? null;
 
     /*
     |--------------------------------------------------------------------------
@@ -812,9 +682,6 @@ export async function POST(req: NextRequest) {
     await db
       .update(products)
       .set({
-        categoryId,
-        subcategoryId,
-        childCategoryId,
         prompt: userPrompt,
         aspectRatio,
         status: 'processing',
@@ -998,9 +865,9 @@ Use exactly this structure:
     const companyName = aiData.companyName || null;
     const price = aiData.price || null;
 
-    // Prefer the merchant's own category / subcategory over the AI-guessed one.
-    const category = categoryName || aiData.category || null;
-    const subcategory = subcategoryName || aiData.subcategory || null;
+    // Use the business profile's category as context; the AI still identifies the uploaded item.
+    const category = businessCategoryName || aiData.category || null;
+    const subcategory = aiData.subcategory || null;
 
     const color = aiData.color || null;
 
@@ -1036,8 +903,6 @@ Use exactly this structure:
       base64Image,
       {
         categoryName: category,
-        subcategoryName: subcategory,
-        childCategoryName,
         userPrompt,
         bannerColor,
         promptType,
@@ -1101,7 +966,6 @@ Use exactly this structure:
           price,
           category,
           subcategory,
-          childCategory: childCategoryName,
           color,
           features,
           description,

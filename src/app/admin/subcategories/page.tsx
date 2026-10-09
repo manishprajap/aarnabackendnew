@@ -1,5 +1,5 @@
-import CatalogAdminPage from '@/app/admin/catalog/CatalogAdminPage';
+import { redirect } from 'next/navigation';
 
 export default function SubcategoriesAdminPage() {
-  return <CatalogAdminPage kind="subcategories" />;
+  redirect('/admin/business-setup');
 }
