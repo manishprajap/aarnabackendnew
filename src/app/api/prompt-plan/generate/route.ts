@@ -1,6 +1,7 @@
 // src/app/api/prompt-plan/generate/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI, Type } from '@google/genai';
+import OpenAI from 'openai';
 import { sql } from 'drizzle-orm';
 
 import { db } from '@/db';
@@ -14,11 +15,12 @@ export const maxDuration = 300;
 
 const PLAN_LENGTH = 30;
 const GEMINI_TEXT_MODEL = 'gemini-3.7-flash';
+const OPENAI_TEXT_MODEL = 'gpt-4o-mini';
+const geminiApiKey = (process.env.GEMINI_API_KEY ?? '').trim();
+const openAiApiKey = (process.env.OPENAI_API_KEY ?? '').trim();
 
 // TEMPORARY: returns the real error to the browser. Set to false when stable.
 const SHOW_DEBUG = true;
-
-const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY ?? '').trim() });
 
 type Row = Record<string, any>;
 
@@ -224,8 +226,8 @@ export async function POST(req: NextRequest) {
     const userId = Number(await getUserIdFromRequest(req));
     if (!Number.isInteger(userId) || userId <= 0) return json({ error: 'unauthorized' }, 401);
 
-    if (!(process.env.GEMINI_API_KEY ?? '').trim()) {
-      return json({ error: 'GEMINI_API_KEY is not configured' }, 500);
+    if (!geminiApiKey && !openAiApiKey) {
+      return json({ error: 'Configure GEMINI_API_KEY or OPENAI_API_KEY to generate a plan.' }, 500);
     }
 
     let body: Row = {};
@@ -356,7 +358,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    /* ---------- Gemini ---------- */
+    /* ---------- AI plan generation ---------- */
     step = 'buildPrompt';
     const businessName = String(user.business_name);
     const goal = String(user.marketing_goal || 'Generate Leads');
@@ -375,22 +377,36 @@ export async function POST(req: NextRequest) {
       customPrompt: String(user.custom_prompt || '').trim(),
     });
 
-    step = 'gemini';
-    const response = await withRetry(() =>
-      ai.models.generateContent({
-        model: GEMINI_TEXT_MODEL,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        config: {
-          temperature: 0.7,
-          maxOutputTokens: 32000,
-          responseMimeType: 'application/json',
-          responseSchema: PLAN_SCHEMA,
-        },
-      })
-    );
-
-    const rawText = response.text?.trim();
-    if (!rawText) throw new HttpError(502, 'Empty response from Gemini. Please try again.');
+    let rawText = '';
+    if (geminiApiKey) {
+      step = 'gemini';
+      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+      const response = await withRetry(() =>
+        ai.models.generateContent({
+          model: GEMINI_TEXT_MODEL,
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          config: {
+            temperature: 0.7,
+            maxOutputTokens: 32000,
+            responseMimeType: 'application/json',
+            responseSchema: PLAN_SCHEMA,
+          },
+        })
+      );
+      rawText = response.text?.trim() ?? '';
+    } else {
+      step = 'openai';
+      const openai = new OpenAI({ apiKey: openAiApiKey });
+      const response = await openai.chat.completions.create({
+        model: OPENAI_TEXT_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.7,
+        max_completion_tokens: 16000,
+        response_format: { type: 'json_object' },
+      });
+      rawText = response.choices[0]?.message?.content?.trim() ?? '';
+    }
+    if (!rawText) throw new HttpError(502, 'Empty response from the AI provider. Please try again.');
 
     step = 'parse';
     let plan: any;
@@ -400,14 +416,14 @@ export async function POST(req: NextRequest) {
       try {
         plan = JSON.parse(rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim());
       } catch {
-        throw new HttpError(502, 'Gemini returned invalid or cut-off JSON. Please try again.');
+        throw new HttpError(502, 'The AI provider returned invalid or cut-off JSON. Please try again.');
       }
     }
     if (!plan || !Array.isArray(plan.days)) {
-      throw new HttpError(502, 'Gemini did not return the expected JSON calendar.');
+      throw new HttpError(502, 'The AI provider did not return the expected JSON calendar.');
     }
     if (plan.days.length < PLAN_LENGTH) {
-      throw new HttpError(502, `Gemini returned ${plan.days.length} days instead of ${PLAN_LENGTH}. Please try again.`);
+      throw new HttpError(502, `The AI provider returned ${plan.days.length} days instead of ${PLAN_LENGTH}. Please try again.`);
     }
     const days = plan.days.slice(0, PLAN_LENGTH) as Row[];
 
