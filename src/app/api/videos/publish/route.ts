@@ -20,6 +20,7 @@ export const maxDuration = 300;
 
 const MAX_VIDEO_BYTES = 10 * 1024 * 1024;
 const META_VERSION = process.env.META_GRAPH_VERSION || 'v25.0';
+const INSTAGRAM_GRAPH_API_BASE = `https://graph.instagram.com/${META_VERSION}`;
 const UPLOAD_ROOT =
   process.env.UPLOAD_ROOT || '/var/www/aarnexai.com/aarnexai-backend/upload';
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://aarnexai.com').replace(/\/+$/, '');
@@ -120,7 +121,7 @@ async function publishInstagramVideo(
   videoUrl: string,
   caption: string,
 ): Promise<string> {
-  const base = `https://graph.facebook.com/${META_VERSION}`;
+  const base = INSTAGRAM_GRAPH_API_BASE;
   const create = new URLSearchParams({
     media_type: 'REELS',
     video_url: videoUrl,
@@ -317,8 +318,7 @@ async function publishYouTubeVideo(
     throw new Error('Choose a YouTube channel before publishing videos.');
   }
 
-  let token = connection.accessToken;
-  if (connection.expiresAt && connection.expiresAt.getTime() <= Date.now() + 60_000) {
+  const refreshAccessToken = async (): Promise<string> => {
     const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
     const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
     if (!connection.refreshToken) {
@@ -358,21 +358,45 @@ async function publishYouTubeVideo(
       }
       throw new Error(description || 'YouTube token refresh failed. Reconnect YouTube from Manage connected accounts.');
     }
-    token = refreshed.access_token;
+
     await db.update(socialAccounts).set({
-      accessToken: token,
+      accessToken: refreshed.access_token,
       expiresAt: new Date(Date.now() + Number(refreshed.expires_in || 3600) * 1000),
       ...(typeof refreshed.refresh_token === 'string'
         ? { refreshToken: refreshed.refresh_token }
         : {}),
     }).where(eq(socialAccounts.id, connection.id));
+    return refreshed.access_token;
+  };
+  const youtubeApiError = (data: Record<string, unknown>, status: number): string => {
+    const providerError = data.error && typeof data.error === 'object'
+      ? data.error as Record<string, unknown>
+      : {};
+    const errors = Array.isArray(providerError.errors) ? providerError.errors : [];
+    const reason = errors
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .map((item) => item.reason)
+      .find((value): value is string => typeof value === 'string');
+
+    if (reason === 'insufficientPermissions' || reason === 'forbidden') {
+      return 'YouTube video upload permission is missing. Reconnect YouTube and approve video upload access.';
+    }
+    if (status === 401) {
+      return 'YouTube rejected the saved authorization. Reconnect YouTube from Manage connected accounts and approve video upload access.';
+    }
+    return metaError(data, 'YouTube video upload failed.');
+  };
+
+  let token = connection.accessToken;
+  if (connection.expiresAt && connection.expiresAt.getTime() <= Date.now() + 60_000) {
+    token = await refreshAccessToken();
   }
 
   const title = (caption.split(/\r?\n/)[0] || 'Video').slice(0, 100);
   const initUrl = new URL('https://www.googleapis.com/upload/youtube/v3/videos');
   initUrl.searchParams.set('uploadType', 'resumable');
   initUrl.searchParams.set('part', 'snippet,status');
-  const initResponse = await fetch(initUrl, {
+  const initRequest = () => fetch(initUrl, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -386,13 +410,18 @@ async function publishYouTubeVideo(
     }),
     cache: 'no-store',
   });
+  let initResponse = await initRequest();
+  if (initResponse.status === 401 && connection.refreshToken) {
+    token = await refreshAccessToken();
+    initResponse = await initRequest();
+  }
   const uploadUrl = initResponse.headers.get('location');
   const init = await responseJson(initResponse);
   if (!initResponse.ok || !uploadUrl) {
-    throw new Error(metaError(init, 'YouTube video upload could not be initialized.'));
+    throw new Error(youtubeApiError(init, initResponse.status));
   }
 
-  const uploadResponse = await fetch(uploadUrl, {
+  const uploadRequest = () => fetch(uploadUrl, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -402,9 +431,14 @@ async function publishYouTubeVideo(
     body: new Uint8Array(video),
     cache: 'no-store',
   });
+  let uploadResponse = await uploadRequest();
+  if (uploadResponse.status === 401 && connection.refreshToken) {
+    token = await refreshAccessToken();
+    uploadResponse = await uploadRequest();
+  }
   const uploaded = await responseJson(uploadResponse);
   if (!uploadResponse.ok || !uploaded.id) {
-    throw new Error(metaError(uploaded, 'YouTube video upload failed.'));
+    throw new Error(youtubeApiError(uploaded, uploadResponse.status));
   }
   return String(uploaded.id);
 }
@@ -471,21 +505,47 @@ export async function POST(request: NextRequest) {
         }
 
         if (platform === 'instagram') {
-          const [connection] = await db.select().from(instagramConnections)
-            .where(and(eq(instagramConnections.userId, userId), eq(instagramConnections.status, 'active')))
-            .limit(1);
-          if (!connection) throw new Error('Instagram is not connected.');
-          if (requestedInstagramAccountIds.length &&
-            !requestedInstagramAccountIds.includes(connection.instagramUserId)) {
-            throw new Error('The selected Instagram account is not connected.');
+          const allConnections = await db.select().from(instagramConnections)
+            .where(eq(instagramConnections.userId, userId));
+          const activeConnections = allConnections.filter((connection) =>
+            connection.status === 'active' &&
+            (!connection.tokenExpiresAt || connection.tokenExpiresAt.getTime() > Date.now()));
+          if (!activeConnections.length) throw new Error('No active Instagram account is connected.');
+          const targets = requestedInstagramAccountIds.length
+            ? activeConnections.filter((connection) =>
+                requestedInstagramAccountIds.includes(connection.instagramUserId))
+            : activeConnections;
+          if (
+            !targets.length ||
+            requestedInstagramAccountIds.some((target) =>
+              !activeConnections.some((connection) => connection.instagramUserId === target))
+          ) {
+            throw new Error('One or more selected Instagram accounts are not connected or have expired authorization.');
           }
-          if (connection.tokenExpiresAt && connection.tokenExpiresAt.getTime() <= Date.now()) {
-            throw new Error('Instagram authorization expired. Reconnect Instagram.');
+
+          const outcomes = await Promise.allSettled(targets.map((connection) =>
+            publishInstagramVideo(
+              connection.instagramUserId,
+              connection.accessToken,
+              publicVideoUrl,
+              caption,
+            )));
+          const postedIds = outcomes.flatMap((outcome) =>
+            outcome.status === 'fulfilled' ? [outcome.value] : []);
+          const failedAccounts = outcomes.flatMap((outcome, index) =>
+            outcome.status === 'rejected'
+              ? [`${targets[index].instagramUsername || targets[index].instagramName || targets[index].instagramUserId}: ${outcome.reason instanceof Error ? outcome.reason.message : 'Publishing failed'}`]
+              : []);
+          if (!postedIds.length) {
+            throw new Error(failedAccounts.join(' | ') || 'Instagram could not publish to the selected accounts.');
           }
-          const id = await publishInstagramVideo(
-            connection.instagramUserId, connection.accessToken, publicVideoUrl, caption,
-          );
-          results.instagram = { success: true, postId: id };
+          results.instagram = {
+            success: true,
+            postId: postedIds.join(','),
+            ...(failedAccounts.length
+              ? { message: `Posted to ${postedIds.length} Instagram account(s); failed: ${failedAccounts.join(' | ')}` }
+              : {}),
+          };
           return;
         }
 

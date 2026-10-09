@@ -68,13 +68,6 @@ export async function POST(request: NextRequest) {
       (t) => t === 'personal' || validOrgUrns.has(t)
     );
 
-    if (cleanTargets.length === 0) {
-      return NextResponse.json(
-        { success: false, message: 'No valid targets in selection.' },
-        { status: 400 }
-      );
-    }
-
     const updatedMetadata = {
       ...metadata,
       selectedTargets: cleanTargets,
