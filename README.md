@@ -97,13 +97,20 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 
 ## Email OTP registration and default subscription plan
 
-New account registration sends a six-digit, five-minute email OTP through Resend. Configure these server-side values in `.env` before production deployment:
+New account registration sends a six-digit, five-minute email OTP through SMTP or Resend. To use SMTP (for example Gmail), configure these values in the backend server environment:
 
 ```env
-RESEND_API_KEY=your_resend_api_key
-EMAIL_FROM=Aarna <verify@your-verified-domain.com>
+MAIL_DRIVER=smtp
+MAIL_HOST=smtp.gmail.com
+MAIL_PORT=587
+MAIL_USERNAME=your-mailbox@gmail.com
+MAIL_PASSWORD=your-gmail-app-password
+MAIL_ENCRYPTION=tls
+FROM_EMAIL=your-mailbox@gmail.com
 ```
 
-Verify the sender domain in Resend. Development can use the returned `devOtp` when these settings are omitted; production refuses to issue an OTP if email delivery is not configured.
+For Gmail, enable 2-Step Verification and use a Google App Password; do not use your regular Gmail password. Keep the mail password only in the server's environment/secret store, never in frontend code or source control. Restart the backend process after changing environment variables.
+
+Alternatively, use Resend with `MAIL_DRIVER=resend`, `RESEND_API_KEY`, and `EMAIL_FROM` (or `FROM_EMAIL`) from a verified sender domain. Development can use the returned `devOtp` when mail settings are omitted; production refuses to issue an OTP if email delivery is not configured.
 
 Apply `drizzle/0007_email_otp_basic_plan.sql` after the earlier billing migrations. It adds the registration email to OTP records, ensures plan duration is present, and seeds a 30-day Basic Plan for ₹999 with 30 banner generations.

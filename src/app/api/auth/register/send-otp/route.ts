@@ -1,12 +1,109 @@
 import { randomInt } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { NextRequest, NextResponse } from 'next/server';
+import nodemailer from 'nodemailer';
 import { z } from 'zod';
 
 import { db } from '@/db';
 import { otps, users } from '@/db/schema';
 
 export const runtime = 'nodejs';
+
+type EmailMessage = {
+  from: string;
+  to: string;
+  name: string;
+  otp: string;
+};
+
+function escapeHtml(value: string) {
+  return value.replace(/[<>&"']/g, (character) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character] || character);
+}
+
+function getMailConfig() {
+  const driver = process.env.MAIL_DRIVER?.trim().toLowerCase();
+  const resendApiKey = process.env.RESEND_API_KEY?.trim();
+  const resendFrom = (process.env.EMAIL_FROM || process.env.FROM_EMAIL)?.trim();
+  const smtpHost = process.env.MAIL_HOST?.trim();
+  const smtpPort = Number(process.env.MAIL_PORT || 587);
+  const smtpUser = process.env.MAIL_USERNAME?.trim();
+  const smtpPassword = process.env.MAIL_PASSWORD?.trim();
+  const smtpEncryption = process.env.MAIL_ENCRYPTION?.trim().toLowerCase();
+  const smtpFrom = (process.env.FROM_EMAIL || process.env.EMAIL_FROM)?.trim();
+  const smtpConfigured = Boolean(
+    smtpHost && Number.isInteger(smtpPort) && smtpPort > 0 && smtpPort <= 65535 &&
+    smtpUser && smtpPassword && smtpFrom
+  );
+
+  if (driver === 'smtp') {
+    return smtpConfigured
+      ? { driver: 'smtp' as const, host: smtpHost!, port: smtpPort, user: smtpUser!, password: smtpPassword!, encryption: smtpEncryption || 'tls', from: smtpFrom! }
+      : null;
+  }
+  if (driver && driver !== 'resend') return null;
+  if (driver === 'resend' || (!driver && resendApiKey && resendFrom)) {
+    return resendApiKey && resendFrom
+      ? { driver: 'resend' as const, apiKey: resendApiKey, from: resendFrom }
+      : null;
+  }
+  if (!driver && smtpConfigured) {
+    return { driver: 'smtp' as const, host: smtpHost!, port: smtpPort, user: smtpUser!, password: smtpPassword!, encryption: smtpEncryption || 'tls', from: smtpFrom! };
+  }
+  return null;
+}
+
+async function sendSmtpEmail(config: Extract<NonNullable<ReturnType<typeof getMailConfig>>, { driver: 'smtp' }>, message: EmailMessage) {
+  const transporter = nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.encryption === 'ssl' || config.port === 465,
+    requireTLS: config.encryption === 'tls',
+    auth: { user: config.user, pass: config.password },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 15_000,
+  });
+  await transporter.sendMail({
+    from: message.from,
+    to: message.to,
+    subject: 'Your Aarna verification code',
+    text: `Hello ${message.name},\n\nYour Aarna verification code is ${message.otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your Aarna account</h2><p>Hello ${escapeHtml(message.name)},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${message.otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
+  });
+}
+
+async function sendResendEmail(config: Extract<NonNullable<ReturnType<typeof getMailConfig>>, { driver: 'resend' }>, message: EmailMessage) {
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: message.from,
+      to: [message.to],
+      subject: 'Your Aarna verification code',
+      text: `Hello ${message.name},\n\nYour Aarna verification code is ${message.otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your Aarna account</h2><p>Hello ${escapeHtml(message.name)},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${message.otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
+    }),
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => '');
+    console.error('[Registration OTP] Resend rejected send request:', {
+      status: response.status,
+      details: details.slice(0, 500),
+    });
+    throw new Error('Email provider rejected the send request.');
+  }
+}
 
 const schema = z.object({
   name: z.string().trim().min(2).max(191),
@@ -50,10 +147,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const resendApiKey = process.env.RESEND_API_KEY?.trim();
-    const emailFrom = process.env.EMAIL_FROM?.trim();
-    if (process.env.NODE_ENV === 'production' && (!resendApiKey || !emailFrom)) {
-      console.error('[Registration OTP] RESEND_API_KEY and EMAIL_FROM must be configured.');
+    const mailConfig = getMailConfig();
+    if (process.env.NODE_ENV === 'production' && !mailConfig) {
+      console.error('[Registration OTP] Configure MAIL_DRIVER and its required server-side email settings.');
       return NextResponse.json(
         { success: false, message: 'Email verification is temporarily unavailable. Please contact support.' },
         { status: 503 },
@@ -69,7 +165,7 @@ export async function POST(request: NextRequest) {
     });
     const otpId = inserted.insertId;
 
-    if (!resendApiKey || !emailFrom) {
+    if (!mailConfig) {
       return NextResponse.json({
         success: true,
         message: 'Verification code created for development.',
@@ -77,28 +173,20 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const emailResponse = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${resendApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: emailFrom,
-        to: [email],
-        subject: 'Your Aarna verification code',
-        text: `Hello ${name},\n\nYour Aarna verification code is ${otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
-        html: `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;color:#0f2a4a"><h2>Verify your Aarna account</h2><p>Hello ${name.replace(/[<>&"']/g, '')},</p><p>Use this one-time code to verify your email:</p><div style="font-size:32px;font-weight:700;letter-spacing:8px;padding:18px;background:#f0f7ff;border-radius:12px;text-align:center">${otp}</div><p>This code expires in 5 minutes. If you did not request it, ignore this email.</p></div>`,
-      }),
-      cache: 'no-store',
-    });
-
-    if (!emailResponse.ok) {
-      const details = await emailResponse.text().catch(() => '');
-      console.error('[Registration OTP] Email provider rejected send request:', {
-        status: emailResponse.status,
-        details: details.slice(0, 500),
-      });
+    try {
+      const message = {
+        from: mailConfig.from,
+        to: email,
+        name,
+        otp,
+      };
+      if (mailConfig.driver === 'smtp') {
+        await sendSmtpEmail(mailConfig, message);
+      } else {
+        await sendResendEmail(mailConfig, message);
+      }
+    } catch (mailError) {
+      console.error('[Registration OTP] Email delivery failed:', mailError);
       await db.delete(otps).where(eq(otps.id, otpId));
       return NextResponse.json(
         { success: false, message: 'Could not send the verification email. Check the address and try again.' },
