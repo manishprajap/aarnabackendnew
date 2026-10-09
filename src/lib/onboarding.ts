@@ -66,6 +66,7 @@ export async function ensureSchema() {
     marketing_goal: "VARCHAR(100) NULL",
     custom_prompt: "TEXT NULL",
     strategy_id: "BIGINT UNSIGNED NULL",
+    logo: "VARCHAR(255) NULL",
   });
   await ensureColumns("customer_marketing_plans", {
     marketing_goal: "VARCHAR(100) NULL",

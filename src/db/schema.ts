@@ -67,6 +67,7 @@ export const otps = mysqlTable(
   {
     id: bigint('id', { mode: 'number', unsigned: true }).autoincrement().primaryKey(),
     mobile: varchar('mobile', { length: 15 }).notNull(),
+    email: varchar('email', { length: 191 }),
     otp: varchar('otp', { length: 6 }).notNull(),
     expiresAt: datetime('expires_at', { mode: 'date' }).notNull(),
     createdAt: datetime('created_at', { mode: 'date' })

@@ -55,6 +55,24 @@ function VendorsIcon() {
   );
 }
 
+function BillingIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 10h18M7 15h3" />
+    </svg>
+  );
+}
+
+function TransactionsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h16M4 12h16M4 17h10" />
+      <circle cx="18" cy="17" r="3" />
+    </svg>
+  );
+}
+
 function LogoutIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -70,6 +88,8 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Subcategories', href: '/admin/manage?tab=subcategory', icon: <SubcategoryIcon /> },
   { label: 'Prompts', href: '/admin/manage?tab=preset', icon: <PromptIcon /> },
   { label: 'Vendors', href: '/admin/vendors', icon: <VendorsIcon /> },
+  { label: 'Billing', href: '/admin/billing', icon: <BillingIcon /> },
+  { label: 'Transactions', href: '/admin/transactions', icon: <TransactionsIcon /> },
 ];
 
 /*

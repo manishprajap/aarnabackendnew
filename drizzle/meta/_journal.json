@@ -50,6 +50,13 @@
       "when": 1791463489573,
       "tag": "0006_billing-coupons",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1791547200000,
+      "tag": "0007_email_otp_basic_plan",
+      "breakpoints": true
     }
   ]
 }

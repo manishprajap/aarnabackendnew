@@ -54,6 +54,7 @@ export async function GET(req: NextRequest) {
         businessName: users.businessName,
         businessCategoryId: users.businessCategoryId,
         city: users.city,
+        logo: users.logo,
       })
       .from(users)
       .where(eq(users.id, payload.userId))

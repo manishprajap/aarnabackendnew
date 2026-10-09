@@ -94,3 +94,16 @@ The easiest way to deploy your Next.js app is to use the [Vercel Platform](https
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
 # aarnabackendnew
+
+## Email OTP registration and default subscription plan
+
+New account registration sends a six-digit, five-minute email OTP through Resend. Configure these server-side values in `.env` before production deployment:
+
+```env
+RESEND_API_KEY=your_resend_api_key
+EMAIL_FROM=Aarna <verify@your-verified-domain.com>
+```
+
+Verify the sender domain in Resend. Development can use the returned `devOtp` when these settings are omitted; production refuses to issue an OTP if email delivery is not configured.
+
+Apply `drizzle/0007_email_otp_basic_plan.sql` after the earlier billing migrations. It adds the registration email to OTP records, ensures plan duration is present, and seeds a 30-day Basic Plan for ₹999 with 30 banner generations.
