@@ -20,6 +20,6 @@ jobs:
             git reset --hard origin/main
             cp /tmp/.env.backup .env 2>/dev/null || true
             npm install
-            npm run build
+            NODE_OPTIONS="--max-old-space-size=1024" npm run build
             pm2 restart aarnexai-backend
             pm2 save
