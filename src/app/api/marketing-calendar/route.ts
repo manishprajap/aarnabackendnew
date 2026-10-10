@@ -66,11 +66,20 @@ export async function GET(request: NextRequest) {
              b.id AS banner_id, b.image_url AS banner_image_url,
              b.caption AS banner_caption,
              CASE
-               WHEN COALESCE(b.posted, 0) = 1 OR EXISTS (
+               WHEN EXISTS (
                  SELECT 1
                  FROM banner_publications publication
                  WHERE publication.banner_id = b.id
                    AND publication.user_id = ${userId}
+                   AND DATE(publication.published_at) = d.scheduled_date
+               ) OR (
+                 COALESCE(b.posted, 0) = 1
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM banner_publications publication
+                   WHERE publication.banner_id = b.id
+                     AND publication.user_id = ${userId}
+                 )
                ) THEN 1
                ELSE 0
              END AS banner_posted
@@ -92,18 +101,37 @@ export async function GET(request: NextRequest) {
       ORDER BY d.day_number ASC
     `)) as Row[];
 
-    if (!rows.length) return json({ success: true, plan: null, days: [] });
-    const first = rows[0];
+    const publishedRows = rowsOf(await db.execute(sql`
+      SELECT DATE(publication.published_at) AS published_date,
+             b.id AS banner_id, b.day AS banner_day, b.theme AS banner_theme,
+             b.image_url AS banner_image_url, b.caption AS banner_caption,
+             GROUP_CONCAT(DISTINCT publication.platform ORDER BY publication.platform) AS platforms
+      FROM banner_publications publication
+      JOIN banners b ON b.id = publication.banner_id
+      JOIN products product ON product.id = b.product_id AND product.user_id = publication.user_id
+      WHERE publication.user_id = ${userId}
+      GROUP BY DATE(publication.published_at), b.id, b.day, b.theme, b.image_url, b.caption
+      ORDER BY published_date DESC, MAX(publication.published_at) DESC
+    `)) as Row[];
 
-    return json({
-      success: true,
-      plan: {
-        startDate: String(first.start_date).slice(0, 10),
-        endDate: String(first.end_date).slice(0, 10),
-      },
-      days: rows.map((row) => ({
+    const calendarDays = new Map<string, {
+      day: number;
+      date: string;
+      theme: unknown;
+      prompt: unknown;
+      caption: unknown;
+      hashtags: unknown;
+      cta: unknown;
+      imagePrompt: unknown;
+      status: unknown;
+      banner: { id: number; imageUrl: string; caption: unknown; posted: boolean; platforms?: string[] } | null;
+    }>();
+
+    for (const row of rows) {
+      const date = String(row.scheduled_date).slice(0, 10);
+      calendarDays.set(date, {
         day: Number(row.day_number),
-        date: String(row.scheduled_date).slice(0, 10),
+        date,
         theme: row.topic_title ?? null,
         prompt: row.prompt ?? null,
         caption: row.caption ?? null,
@@ -119,7 +147,60 @@ export async function GET(request: NextRequest) {
               posted: row.banner_posted === true || Number(row.banner_posted) === 1,
             }
           : null,
-      })),
+      });
+    }
+
+    for (const row of publishedRows) {
+      const date = String(row.published_date).slice(0, 10);
+      const existing = calendarDays.get(date);
+      const platforms = String(row.platforms ?? "")
+        .split(",")
+        .map((platform) => platform.trim())
+        .filter(Boolean);
+      if (existing) {
+        if (!existing.banner?.platforms?.length) {
+          existing.banner = {
+            id: Number(row.banner_id),
+            imageUrl: toFullUrl(row.banner_image_url),
+            caption: row.banner_caption,
+            posted: true,
+            platforms,
+          };
+        }
+        existing.status = "PUBLISHED";
+        if (!existing.theme) existing.theme = row.banner_theme ?? null;
+        if (!existing.caption) existing.caption = row.banner_caption ?? null;
+      } else {
+        calendarDays.set(date, {
+          day: Number(date.slice(8, 10)),
+          date,
+          theme: row.banner_theme ?? null,
+          prompt: null,
+          caption: row.banner_caption ?? null,
+          hashtags: null,
+          cta: null,
+          imagePrompt: null,
+          status: "PUBLISHED",
+          banner: {
+            id: Number(row.banner_id),
+            imageUrl: toFullUrl(row.banner_image_url),
+            caption: row.banner_caption,
+            posted: true,
+            platforms,
+          },
+        });
+      }
+    }
+
+    const first = rows[0];
+
+    return json({
+      success: true,
+      plan: first ? {
+        startDate: String(first.start_date).slice(0, 10),
+        endDate: String(first.end_date).slice(0, 10),
+      } : null,
+      days: Array.from(calendarDays.values()).sort((a, b) => a.date.localeCompare(b.date)),
     });
   } catch (error) {
     if (error instanceof AuthError) return json({ success: false, error: error.message }, 401);
