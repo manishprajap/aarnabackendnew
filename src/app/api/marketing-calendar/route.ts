@@ -30,10 +30,24 @@ function stringValue(value: unknown, maxLength: number): string {
 }
 
 function toFullUrl(value: unknown): string {
-  const url = stringValue(value, 1000);
-  if (!url) return "";
-  if (/^https?:\/\//i.test(url)) return url;
-  return `${MEDIA_ORIGIN}${url.startsWith("/") ? "" : "/"}${url}`;
+  const raw = stringValue(value, 1000);
+  if (!raw) return "";
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.hostname === "aarnexai.com") {
+        url.pathname = url.pathname.replace(/^\/aarnexai-backend(?=\/upload\/)/, "");
+      }
+      return url.toString();
+    } catch {
+      return raw;
+    }
+  }
+
+  const normalizedPath = `/${raw.replace(/^\/+/, "")}`
+    .replace(/^\/aarnexai-backend(?=\/upload\/)/, "");
+  return `${MEDIA_ORIGIN}${normalizedPath}`;
 }
 
 function getLogoMimeType(fileName: string): string {

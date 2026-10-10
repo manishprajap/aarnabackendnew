@@ -51,8 +51,21 @@ function normalizeInstagramError(message: string): string {
 
 function toFullMediaUrl(value: string | null | undefined): string | null {
   if (!value) return null;
-  if (/^https?:\/\//i.test(value)) return value;
-  return `${MEDIA_ORIGIN}${value.startsWith('/') ? '' : '/'}${value}`;
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      if (url.hostname === 'aarnexai.com') {
+        url.pathname = url.pathname.replace(/^\/aarnexai-backend(?=\/upload\/)/, '');
+      }
+      return url.toString();
+    } catch {
+      return value;
+    }
+  }
+
+  const normalizedPath = `/${value.replace(/^\/+/, '')}`
+    .replace(/^\/aarnexai-backend(?=\/upload\/)/, '');
+  return `${MEDIA_ORIGIN}${normalizedPath}`;
 }
 
 function getYouTubeAuthorizationError(status: number, data: any, fallback: string): string {
