@@ -6,10 +6,44 @@ import { getUserIdFromRequest, AuthError } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
+async function getProductRequestBody(
+  request: NextRequest
+): Promise<Record<string, unknown> | null> {
+  try {
+    let body: unknown;
+
+    if (request.headers.get("content-type")?.includes("multipart/form-data")) {
+      const formData = await request.formData();
+      body = Object.fromEntries(
+        [...formData.entries()].filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string"
+        )
+      );
+    } else {
+      body = await request.json();
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return null;
+    }
+
+    return body as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const userId = await getUserIdFromRequest(request);
-    const body = await request.json();
+    const body = await getProductRequestBody(request);
+
+    if (!body) {
+      return NextResponse.json(
+        { success: false, message: "Invalid request body" },
+        { status: 400 }
+      );
+    }
 
     const title = String(
       body.title ?? body.name ?? body.productName ?? ""
@@ -69,7 +103,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.error("POST /api/products error:", error);
+    console.error("POST /api/userproduct error:", error);
 
     return NextResponse.json(
       { success: false, message: "Failed to save product" },
