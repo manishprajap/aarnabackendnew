@@ -42,6 +42,13 @@ function getErrorMessage(data: any, fallback: string): string {
   return data?.error?.message || data?.error_message || data?.message || fallback;
 }
 
+function normalizeInstagramError(message: string): string {
+  if (/unsupported get request|does not exist, cannot be loaded|missing permissions/i.test(message)) {
+    return "Instagram could not access this post's insights. Reconnect the correct professional account and grant Instagram insights permission.";
+  }
+  return message;
+}
+
 function toFullMediaUrl(value: string | null | undefined): string | null {
   if (!value) return null;
   if (/^https?:\/\//i.test(value)) return value;
@@ -127,14 +134,18 @@ async function fetchInstagramMediaInsights(mediaId: string, accessToken: string)
 
   let { response, data } = await requestMetrics('impressions,reach,profile_visits');
   if (!response.ok) {
-    const errorMessage = getErrorMessage(data, 'Instagram insights request failed');
+    const errorMessage = normalizeInstagramError(
+      getErrorMessage(data, 'Instagram insights request failed')
+    );
     if (!/does not support the impressions metric/i.test(errorMessage)) {
       throw new Error(errorMessage);
     }
 
     ({ response, data } = await requestMetrics('views,reach,profile_visits'));
     if (!response.ok) {
-      throw new Error(getErrorMessage(data, 'Instagram insights request failed'));
+      throw new Error(
+        normalizeInstagramError(getErrorMessage(data, 'Instagram insights request failed'))
+      );
     }
   }
 
@@ -160,7 +171,9 @@ async function fetchInstagramEngagement(mediaId: string, accessToken: string) {
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(getErrorMessage(data, 'Instagram engagement request failed'));
+    throw new Error(
+      normalizeInstagramError(getErrorMessage(data, 'Instagram engagement request failed'))
+    );
   }
 
   return {
@@ -718,11 +731,14 @@ export async function GET(req: NextRequest) {
               await fetchInstagramMediaInsights(row.externalId, instagramToken)
             );
           } catch (error) {
-            console.warn(`[Analytics] Instagram views unavailable for ${row.externalId}:`, error);
-            instagramMetrics.insightsNote =
+            const message =
               error instanceof Error
                 ? error.message
                 : 'Instagram views/reach are unavailable for this post.';
+            if (!/Instagram could not access this post's insights/i.test(message)) {
+              console.warn(`[Analytics] Instagram views unavailable for ${row.externalId}:`, error);
+            }
+            instagramMetrics.insightsNote = message;
           }
 
           let engagement: Record<string, number | string> = {};
@@ -732,13 +748,15 @@ export async function GET(req: NextRequest) {
               instagramToken
             );
           } catch (error) {
-            console.warn(`[Analytics] Instagram likes/comments unavailable for ${row.externalId}:`, error);
             const message =
               error instanceof Error
                 ? error.message
                 : 'Instagram likes/comments are unavailable for this post.';
+            if (!/Instagram could not access this post's insights/i.test(message)) {
+              console.warn(`[Analytics] Instagram likes/comments unavailable for ${row.externalId}:`, error);
+            }
             engagement.engagementNote = /instagram_business_manage_insights|permission/i.test(message)
-              ? 'Reconnect Instagram and grant the instagram_business_manage_insights permission.'
+              ? "Instagram could not access this post's insights. Reconnect the correct professional account and grant Instagram insights permission."
               : message;
           }
 
