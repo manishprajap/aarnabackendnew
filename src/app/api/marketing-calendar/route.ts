@@ -301,18 +301,20 @@ export async function POST(request: NextRequest) {
 
       if (existingProduct) {
         const existingId = Number(existingProduct.id);
+        const isFreshProcessing = existingProduct.status === "processing"
+          && (existingProduct.is_recent === true || Number(existingProduct.is_recent) === 1);
+        if (isFreshProcessing) {
+          return { productId: existingId, bannerId: null, alreadyPosted: false, busy: true, previousStatus: "processing" };
+        }
+
         const existingBanner = rowsOf(await tx.execute(sql`
-          SELECT id, image_url FROM banners
+          SELECT id, posted FROM banners
           WHERE product_id = ${existingId} AND day = ${day}
           LIMIT 1
         `))[0] as Row | undefined;
-        if (existingBanner) {
-          return { productId: existingId, banner: existingBanner, complete: true, busy: false, previousStatus: String(existingProduct.status ?? "done") };
+        if (existingBanner && (existingBanner.posted === true || Number(existingBanner.posted) === 1)) {
+          return { productId: existingId, bannerId: null, alreadyPosted: true, busy: false, previousStatus: String(existingProduct.status ?? "done") };
         }
-
-        const isFreshProcessing = existingProduct.status === "processing"
-          && (existingProduct.is_recent === true || Number(existingProduct.is_recent) === 1);
-        if (isFreshProcessing) return { productId: existingId, banner: null, complete: false, busy: true, previousStatus: String(existingProduct.status ?? "done") };
 
         await tx.execute(sql`
           UPDATE products SET status = 'processing', created_at = NOW()
@@ -321,7 +323,13 @@ export async function POST(request: NextRequest) {
         const previousStatus = existingProduct.status === "processing"
           ? "failed"
           : String(existingProduct.status ?? "done");
-        return { productId: existingId, banner: null, complete: false, busy: false, previousStatus };
+        return {
+          productId: existingId,
+          bannerId: existingBanner ? Number(existingBanner.id) : null,
+          alreadyPosted: false,
+          busy: false,
+          previousStatus,
+        };
       }
 
       const insert = await tx.execute(sql`
@@ -334,19 +342,15 @@ export async function POST(request: NextRequest) {
       `);
       const id = insertIdOf(insert);
       if (!id) throw new Error("Could not reserve the calendar banner.");
-      return { productId: id, banner: null, complete: false, busy: false, previousStatus: "failed" };
+      return { productId: id, bannerId: null, alreadyPosted: false, busy: false, previousStatus: "failed" };
     });
 
     productId = claim.productId;
-    if (claim.complete) {
-      return json({
-        success: true,
-        alreadyGenerated: true,
-        banner: { id: Number(claim.banner?.id), imageUrl: toFullUrl(claim.banner?.image_url) },
-      });
-    }
     if (claim.busy) {
       return json({ success: false, error: "A banner is already being generated. Please wait a moment." }, 409);
+    }
+    if (claim.alreadyPosted) {
+      return json({ success: false, error: "A published banner cannot be replaced." }, 409);
     }
 
     const reservation = await reserveBannerGeneration(userId, {
@@ -423,12 +427,22 @@ export async function POST(request: NextRequest) {
             description = ${imagePrompt}, category = ${categoryName || null}, status = 'done'
         WHERE id = ${productId} AND user_id = ${userId}
       `);
-      const result = await tx.execute(sql`
-        INSERT INTO banners (product_id, day, theme, image_url, caption, posted)
-        VALUES (${productId}, ${day}, ${stringValue(profile.topic_title, 100) || strategyName}, ${imageUrl}, ${caption || null}, false)
-      `);
-      const bannerId = insertIdOf(result);
-      if (!bannerId) throw new Error("Could not save the generated calendar banner.");
+      let bannerId = claim.bannerId;
+      if (bannerId) {
+        await tx.execute(sql`
+          UPDATE banners
+          SET theme = ${stringValue(profile.topic_title, 100) || strategyName},
+              image_url = ${imageUrl}, caption = ${caption || null}
+          WHERE id = ${bannerId} AND product_id = ${productId} AND COALESCE(posted, 0) = 0
+        `);
+      } else {
+        const result = await tx.execute(sql`
+          INSERT INTO banners (product_id, day, theme, image_url, caption, posted)
+          VALUES (${productId}, ${day}, ${stringValue(profile.topic_title, 100) || strategyName}, ${imageUrl}, ${caption || null}, false)
+        `);
+        bannerId = insertIdOf(result);
+        if (!bannerId) throw new Error("Could not save the generated calendar banner.");
+      }
       await tx.execute(sql`
         UPDATE ad_creatives SET status = 'done', image_url = ${imageUrl}
         WHERE id = ${creativeId} AND product_id = ${productId}
