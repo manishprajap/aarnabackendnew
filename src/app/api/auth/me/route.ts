@@ -52,8 +52,11 @@ export async function GET(req: NextRequest) {
         plan: users.plan,
         credits: users.credits,
         businessName: users.businessName,
+        category: users.business_category,
         businessCategoryId: users.businessCategoryId,
         city: users.city,
+        website: users.website,
+        language: users.language,
         logo: users.logo,
       })
       .from(users)
