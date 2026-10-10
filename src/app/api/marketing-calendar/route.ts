@@ -30,10 +30,24 @@ function stringValue(value: unknown, maxLength: number): string {
 }
 
 function toFullUrl(value: unknown): string {
-  const url = stringValue(value, 1000);
-  if (!url) return "";
-  if (/^https?:\/\//i.test(url)) return url;
-  return `${MEDIA_ORIGIN}${url.startsWith("/") ? "" : "/"}${url}`;
+  const raw = stringValue(value, 1000);
+  if (!raw) return "";
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.hostname === "aarnexai.com") {
+        url.pathname = url.pathname.replace(/^\/aarnexai-backend(?=\/upload\/)/, "");
+      }
+      return url.toString();
+    } catch {
+      return raw;
+    }
+  }
+
+  const normalizedPath = `/${raw.replace(/^\/+/, "")}`
+    .replace(/^\/aarnexai-backend(?=\/upload\/)/, "");
+  return `${MEDIA_ORIGIN}${normalizedPath}`;
 }
 
 function getLogoMimeType(fileName: string): string {
@@ -125,6 +139,13 @@ export async function GET(request: NextRequest) {
       imagePrompt: unknown;
       status: unknown;
       banner: { id: number; imageUrl: string; caption: unknown; posted: boolean; platforms?: string[] } | null;
+      publishedBanners: Array<{
+        id: number;
+        imageUrl: string;
+        caption: unknown;
+        theme: unknown;
+        platforms: string[];
+      }>;
     }>();
 
     for (const row of rows) {
@@ -147,6 +168,7 @@ export async function GET(request: NextRequest) {
               posted: row.banner_posted === true || Number(row.banner_posted) === 1,
             }
           : null,
+        publishedBanners: [],
       });
     }
 
@@ -157,8 +179,18 @@ export async function GET(request: NextRequest) {
         .split(",")
         .map((platform) => platform.trim())
         .filter(Boolean);
+      const publishedBanner = {
+        id: Number(row.banner_id),
+        imageUrl: toFullUrl(row.banner_image_url),
+        caption: row.banner_caption,
+        theme: row.banner_theme ?? null,
+        platforms,
+      };
       if (existing) {
-        if (!existing.banner?.platforms?.length) {
+        if (!existing.publishedBanners.some((banner) => banner.id === publishedBanner.id)) {
+          existing.publishedBanners.push(publishedBanner);
+        }
+        if (!existing.banner?.posted || !existing.banner.platforms?.length) {
           existing.banner = {
             id: Number(row.banner_id),
             imageUrl: toFullUrl(row.banner_image_url),
@@ -181,6 +213,7 @@ export async function GET(request: NextRequest) {
           cta: null,
           imagePrompt: null,
           status: "PUBLISHED",
+          publishedBanners: [publishedBanner],
           banner: {
             id: Number(row.banner_id),
             imageUrl: toFullUrl(row.banner_image_url),
