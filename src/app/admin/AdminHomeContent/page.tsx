@@ -164,6 +164,7 @@ export default function AdminHomeContentPage() {
 
   const [loading, setLoading] = useState(true);
   const [savingBanner, setSavingBanner] = useState(false);
+  const [bannerMediaFile, setBannerMediaFile] = useState<File | null>(null);
   const [savingNews, setSavingNews] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [needsAdminSession, setNeedsAdminSession] = useState(false);
@@ -207,7 +208,11 @@ export default function AdminHomeContentPage() {
     ): Promise<ApiResult> => {
       const headers = new Headers(options.headers);
 
-      if (options.body !== undefined && options.body !== null) {
+      if (
+        options.body !== undefined &&
+        options.body !== null &&
+        !(options.body instanceof FormData)
+      ) {
         headers.set('Content-Type', 'application/json');
       }
 
@@ -281,6 +286,7 @@ export default function AdminHomeContentPage() {
 
   const resetBanner = () => {
     setBannerForm({ ...emptyBanner });
+    setBannerMediaFile(null);
     setEditingBannerId(null);
   };
 
@@ -303,6 +309,7 @@ export default function AdminHomeContentPage() {
         display_order: Number(item.display_order || 0),
         is_active: isActive(item.is_active),
       });
+      setBannerMediaFile(null);
     } else {
       setEditingNewsId(item.id);
 
@@ -345,22 +352,26 @@ export default function AdminHomeContentPage() {
       return;
     }
 
-    if (!bannerForm.media_url.trim()) {
-      notify(
-        `Please enter the ${
-          bannerForm.media_type === 'video' ? 'video' : 'image'
-        } URL.`,
-        'error',
-      );
+    if (!bannerMediaFile && !bannerForm.media_url.trim()) {
+      notify(`Please upload a ${bannerForm.media_type} file.`, 'error');
       return;
     }
-
-    if (!isHttpUrl(bannerForm.media_url)) {
-      notify(
-        'Media URL must start with http:// or https://.',
-        'error',
-      );
-      return;
+    if (bannerMediaFile) {
+      const expectedPrefix = bannerForm.media_type === 'image' ? 'image/' : 'video/';
+      const maxSize = bannerForm.media_type === 'image' ? 10 * 1024 * 1024 : 100 * 1024 * 1024;
+      if (!bannerMediaFile.type.startsWith(expectedPrefix)) {
+        notify(`Choose a valid ${bannerForm.media_type} file.`, 'error');
+        return;
+      }
+      if (bannerMediaFile.size > maxSize) {
+        notify(
+          bannerForm.media_type === 'image'
+            ? 'Image must be no larger than 10 MB.'
+            : 'Video must be no larger than 100 MB.',
+          'error',
+        );
+        return;
+      }
     }
 
     if (
@@ -385,22 +396,36 @@ export default function AdminHomeContentPage() {
       return;
     }
 
-    const payload = {
-      content_type: 'banner',
-      title: bannerForm.title.trim(),
-      description: bannerForm.description.trim() || null,
-      media_type: bannerForm.media_type,
-      media_url: bannerForm.media_url.trim(),
-      button_text: bannerForm.button_text.trim() || null,
-      button_url: bannerForm.button_url.trim() || null,
-      news_url: null,
-      display_order: bannerForm.display_order,
-      is_active: bannerForm.is_active,
-    };
-
     setSavingBanner(true);
 
     try {
+      let mediaUrl = bannerForm.media_url.trim();
+      if (bannerMediaFile) {
+        const formData = new FormData();
+        formData.append('file', bannerMediaFile);
+        formData.append('media_type', bannerForm.media_type);
+        const uploaded = await request(`${ENDPOINT}/media`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (typeof uploaded.media_url !== 'string' || !uploaded.media_url) {
+          throw new Error('Media upload did not return a saved file.');
+        }
+        mediaUrl = uploaded.media_url;
+      }
+
+      const payload = {
+        content_type: 'banner',
+        title: bannerForm.title.trim(),
+        description: bannerForm.description.trim() || null,
+        media_type: bannerForm.media_type,
+        media_url: mediaUrl,
+        button_text: bannerForm.button_text.trim() || null,
+        button_url: bannerForm.button_url.trim() || null,
+        news_url: null,
+        display_order: bannerForm.display_order,
+        is_active: bannerForm.is_active,
+      };
       await save(payload, editingBannerId);
 
       notify(
@@ -642,12 +667,14 @@ export default function AdminHomeContentPage() {
                   id="banner_media_type"
                   className={inputClass}
                   value={bannerForm.media_type}
-                  onChange={(event) =>
-                    updateBanner(
-                      'media_type',
-                      event.target.value as 'image' | 'video',
-                    )
-                  }
+                  onChange={(event) => {
+                    const mediaType = event.target.value as 'image' | 'video';
+                    updateBanner('media_type', mediaType);
+                    setBannerMediaFile(null);
+                    if (mediaType !== bannerForm.media_type) {
+                      updateBanner('media_url', '');
+                    }
+                  }}
                 >
                   <option value="image">Image</option>
                   <option value="video">Video</option>
@@ -655,26 +682,50 @@ export default function AdminHomeContentPage() {
               </div>
 
               <div className="sm:col-span-2">
-                <label className={labelClass} htmlFor="banner_media_url">
-                  {bannerForm.media_type === 'video'
-                    ? 'Video URL'
-                    : 'Image URL'}
+                <label className={labelClass} htmlFor="banner_media_file">
+                  Upload {bannerForm.media_type === 'video' ? 'video' : 'image'}
                 </label>
                 <input
-                  id="banner_media_url"
-                  type="url"
-                  className={inputClass}
-                  value={bannerForm.media_url}
-                  placeholder={
-                    bannerForm.media_type === 'video'
-                      ? 'https://example.com/video.mp4'
-                      : 'https://example.com/image.jpg'
-                  }
-                  onChange={(event) =>
-                    updateBanner('media_url', event.target.value)
-                  }
-                  required
+                  id="banner_media_file"
+                  type="file"
+                  accept={bannerForm.media_type === 'video'
+                    ? 'video/mp4,video/webm,video/quicktime'
+                    : 'image/jpeg,image/png,image/webp,image/gif'}
+                  className={`${inputClass} file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-semibold`}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] ?? null;
+                    setBannerMediaFile(file);
+                  }}
                 />
+                <p className="mt-1 text-xs text-slate-500">
+                  {bannerForm.media_type === 'video'
+                    ? 'MP4, WEBM or MOV · maximum 100 MB'
+                    : 'JPG, PNG, WEBP or GIF · maximum 10 MB'}
+                </p>
+                {bannerMediaFile && (
+                  <p className="mt-2 text-sm font-medium text-slate-700">
+                    Selected: {bannerMediaFile.name}
+                  </p>
+                )}
+                {!bannerMediaFile && bannerForm.media_url && (
+                  <div className="mt-3">
+                    <p className="mb-2 text-xs font-medium text-slate-500">Current media (upload a new file to replace it)</p>
+                    {bannerForm.media_type === 'video' ? (
+                      <video
+                        src={bannerForm.media_url}
+                        controls
+                        preload="metadata"
+                        className="max-h-40 max-w-full rounded-lg"
+                      />
+                    ) : (
+                      <img
+                        src={bannerForm.media_url}
+                        alt="Current banner media"
+                        className="max-h-40 max-w-full rounded-lg object-contain"
+                      />
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
