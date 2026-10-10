@@ -43,6 +43,8 @@ Apply the `drizzle/0005_google_business.sql` migration, then enable the Business
 
 Apply `drizzle/0008_home_content.sql` and then `drizzle/0009_repair_home_content.sql` to the production database before using the Admin Homepage Content page. The repair migration creates the table if missing, adds `news_url` if needed, and updates `media_type` to support both existing `text` values and the API's `none` value.
 
+`GET /api/admin/home-content` is public and returns active homepage banners and news for client applications. Requests with a valid admin session receive all records, including inactive content. Create, update, activate/deactivate, and delete operations still require an admin session.
+
 For example, with the production database selected:
 
 ```sh

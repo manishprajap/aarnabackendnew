@@ -248,19 +248,28 @@ function handleError(error: unknown) {
   return jsonError('Internal server error', 500);
 }
 
-// GET: List all banners and news for the admin page.
+// Admins receive all records; public clients receive only active homepage content.
 export async function GET(req: NextRequest) {
   try {
-    requireAdmin(req);
+    const isAdmin = isAdminRequest(req);
 
-    const result = await db.execute(sql`
-      SELECT
-        id, content_type, title, description, media_url, media_type,
-        button_text, button_url, news_url, display_order, is_active,
-        created_by, created_at, updated_at
-      FROM home_content
-      ORDER BY content_type ASC, display_order ASC, id DESC
-    `);
+    const result = isAdmin
+      ? await db.execute(sql`
+          SELECT
+            id, content_type, title, description, media_url, media_type,
+            button_text, button_url, news_url, display_order, is_active,
+            created_by, created_at, updated_at
+          FROM home_content
+          ORDER BY content_type ASC, display_order ASC, id DESC
+        `)
+      : await db.execute(sql`
+          SELECT
+            id, content_type, title, description, media_url, media_type,
+            button_text, button_url, news_url, display_order, is_active
+          FROM home_content
+          WHERE is_active = 1
+          ORDER BY content_type ASC, display_order ASC, id DESC
+        `);
 
     return NextResponse.json({
       success: true,
