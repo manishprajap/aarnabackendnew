@@ -15,6 +15,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Aarnex AI Admin Console",
   description: "Secure administration workspace for Aarnex AI.",
+  icons: {
+    icon: "/aarnexai-backend/aarna-logo.png",
+    shortcut: "/aarnexai-backend/aarna-logo.png",
+    apple: "/aarnexai-backend/aarna-logo.png",
+  },
 };
 
 export default function RootLayout({

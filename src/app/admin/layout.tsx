@@ -174,14 +174,12 @@ function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 lg:flex-row">
       <aside className="flex w-full shrink-0 flex-col border-b border-slate-800 bg-slate-900 px-4 py-4 sm:px-6 lg:min-h-screen lg:w-64 lg:border-b-0 lg:px-4 lg:py-6">
-        <div className="mb-4 flex items-center gap-2.5 px-2 lg:mb-8">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white">
-            A
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-white">AI Project Ads</p>
-            <p className="text-xs text-slate-500">Admin Console</p>
-          </div>
+        <div className="mb-4 flex items-center rounded-xl bg-white px-3 py-2.5 shadow-sm lg:mb-8">
+          <img
+            src={`${NEXT_PUBLIC_BASE_PATH}/aarna-logo.png`}
+            alt="Aarnex AI"
+            className="h-auto w-full max-w-[190px] object-contain"
+          />
         </div>
 
         <nav className="flex flex-wrap gap-1 lg:flex-1 lg:flex-col lg:space-y-1">{navLinks}</nav>
