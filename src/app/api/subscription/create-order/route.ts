@@ -5,7 +5,7 @@ import { db } from '@/db';
 import { plans, subscriptions, transactions } from '@/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { corsHeaders } from '@/lib/cors';
-import { razorpay, razorpayKeyId } from '@/lib/razorpay';
+import { getRazorpayConfig } from '@/lib/razorpay';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { CouponValidationError, getValidCouponDiscount } from '@/lib/coupons';
 
@@ -23,6 +23,7 @@ export async function POST(req: NextRequest) {
   try {
     // await is harmless if the function is sync, and required if it is async.
     const userId = Number(await getUserIdFromRequest(req));
+    const { razorpay, razorpayKeyId } = getRazorpayConfig();
 
     const body = await req.json();
     const planId = Number(body?.planId);

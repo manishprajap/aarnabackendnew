@@ -2,11 +2,16 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { NextRequest } from 'next/server';
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
 const JWT_EXPIRES_IN = '30d';
 
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET is not set in your environment variables.');
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+
+  if (!secret) {
+    throw new Error('JWT_SECRET is not set in your environment variables.');
+  }
+
+  return secret;
 }
 
 export function hashPassword(password: string): Promise<string> {
@@ -22,12 +27,14 @@ export interface JwtPayload {
 }
 
 export function signToken(payload: JwtPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: JWT_EXPIRES_IN });
 }
 
 export function verifyToken(token: string): JwtPayload | null {
+  const secret = getJwtSecret();
+
   try {
-    return jwt.verify(token, JWT_SECRET) as JwtPayload;
+    return jwt.verify(token, secret) as JwtPayload;
   } catch {
     return null;
   }

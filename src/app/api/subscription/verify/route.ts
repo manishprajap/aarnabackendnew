@@ -7,7 +7,7 @@ import { plans, subscriptions, transactions, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { corsHeaders } from '@/lib/cors';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
-import { razorpayKeySecret } from '@/lib/razorpay';
+import { getRazorpayConfig } from '@/lib/razorpay';
 
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status, headers: corsHeaders() });
@@ -27,6 +27,7 @@ function safeEqual(a: string, b: string) {
 export async function POST(req: NextRequest) {
   try {
     const userId = Number(await getUserIdFromRequest(req));
+    const { razorpayKeySecret } = getRazorpayConfig();
     const body = await req.json();
 
     const razorpayOrderId = String(body?.razorpay_order_id || '').trim();

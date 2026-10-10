@@ -66,6 +66,15 @@ function TransactionsIcon() {
   );
 }
 
+function HomeContentIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 10h18M9 20V10" />
+    </svg>
+  );
+}
+
 function LogoutIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -82,6 +91,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Vendors', href: '/admin/vendors', icon: <VendorsIcon /> },
   { label: 'Billing', href: '/admin/billing', icon: <BillingIcon /> },
   { label: 'Transactions', href: '/admin/transactions', icon: <TransactionsIcon /> },
+  { label: 'Homepage Content', href: '/admin/AdminHomeContent', icon: <HomeContentIcon /> },
 ];
 
 /*

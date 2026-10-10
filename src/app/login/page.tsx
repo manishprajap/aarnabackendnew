@@ -1,8 +1,11 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { API_URL } from '@/lib/config';
 
 const LoginPage: React.FC = () => {
+  const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -20,9 +23,10 @@ const LoginPage: React.FC = () => {
     setError('');
 
     try {
-      const res = await fetch('/aarnexai-backend/api/admin/login', {
+      const res = await fetch(`${API_URL}/admin/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email, password }),
       });
 
@@ -32,9 +36,9 @@ const LoginPage: React.FC = () => {
         throw new Error(data.message || 'Login failed');
       }
 
-      window.location.href = '/aarnexai-backend/admin';
-    } catch (err: any) {
-      setError(err?.message || 'Login failed');
+      router.push('/admin');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
       setLoading(false);
     }

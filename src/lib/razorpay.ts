@@ -6,16 +6,32 @@ import Razorpay from 'razorpay';
 const clean = (v: string | undefined) =>
   (v ?? '').trim().replace(/^["']|["']$/g, '').trim();
 
-export const razorpayKeyId = clean(process.env.RAZORPAY_KEY_ID);
-export const razorpayKeySecret = clean(process.env.RAZORPAY_KEY_SECRET);
+let razorpayConfig:
+  | {
+      razorpay: Razorpay;
+      razorpayKeyId: string;
+      razorpayKeySecret: string;
+    }
+  | undefined;
 
-if (!razorpayKeyId || !razorpayKeySecret) {
-  throw new Error(
-    'RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are missing from environment variables'
-  );
+export function getRazorpayConfig() {
+  if (razorpayConfig) {
+    return razorpayConfig;
+  }
+
+  const keyId = clean(process.env.RAZORPAY_KEY_ID);
+  const keySecret = clean(process.env.RAZORPAY_KEY_SECRET);
+
+  if (!keyId || !keySecret) {
+    throw new Error(
+      'RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are missing from environment variables'
+    );
+  }
+
+  razorpayConfig = {
+    razorpay: new Razorpay({ key_id: keyId, key_secret: keySecret }),
+    razorpayKeyId: keyId,
+    razorpayKeySecret: keySecret,
+  };
+  return razorpayConfig;
 }
-
-export const razorpay = new Razorpay({
-  key_id: razorpayKeyId,
-  key_secret: razorpayKeySecret,
-});
