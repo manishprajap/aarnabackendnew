@@ -17,6 +17,8 @@ interface HomeContent {
   button_text: string | null;
   button_url: string | null;
   news_url: string | null;
+  start_date: string | null;
+  end_date: string | null;
   display_order: number;
   is_active: number | boolean;
 }
@@ -28,6 +30,8 @@ interface BannerForm {
   media_url: string;
   button_text: string;
   button_url: string;
+  start_date: string;
+  end_date: string;
   display_order: number;
   is_active: boolean;
 }
@@ -36,6 +40,8 @@ interface NewsForm {
   title: string;
   description: string;
   news_url: string;
+  start_date: string;
+  end_date: string;
   display_order: number;
   is_active: boolean;
 }
@@ -56,6 +62,8 @@ const emptyBanner: BannerForm = {
   media_url: '',
   button_text: '',
   button_url: '',
+  start_date: '',
+  end_date: '',
   display_order: 0,
   is_active: true,
 };
@@ -64,6 +72,8 @@ const emptyNews: NewsForm = {
   title: '',
   description: '',
   news_url: '',
+  start_date: '',
+  end_date: '',
   display_order: 0,
   is_active: true,
 };
@@ -73,6 +83,12 @@ const isActive = (value: number | boolean) =>
 
 const isHttpUrl = (value: string) =>
   /^https?:\/\//i.test(value.trim());
+
+const toDateInputValue = (value: string | null) =>
+  value ? value.slice(0, 10) : '';
+
+const isValidDateRange = (startDate: string, endDate: string) =>
+  !startDate || !endDate || startDate <= endDate;
 
 const cardClass =
   'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6';
@@ -306,6 +322,8 @@ export default function AdminHomeContentPage() {
         media_url: item.media_url || '',
         button_text: item.button_text || '',
         button_url: item.button_url || '',
+        start_date: toDateInputValue(item.start_date),
+        end_date: toDateInputValue(item.end_date),
         display_order: Number(item.display_order || 0),
         is_active: isActive(item.is_active),
       });
@@ -317,6 +335,8 @@ export default function AdminHomeContentPage() {
         title: item.title || '',
         description: item.description || '',
         news_url: item.news_url || '',
+        start_date: toDateInputValue(item.start_date),
+        end_date: toDateInputValue(item.end_date),
         display_order: Number(item.display_order || 0),
         is_active: isActive(item.is_active),
       });
@@ -346,6 +366,11 @@ export default function AdminHomeContentPage() {
     event.preventDefault();
 
     if (savingBanner) return;
+
+    if (!isValidDateRange(bannerForm.start_date, bannerForm.end_date)) {
+      notify('End date must be on or after the start date.', 'error');
+      return;
+    }
 
     if (!bannerForm.title.trim()) {
       notify('Please enter the banner title.', 'error');
@@ -423,6 +448,8 @@ export default function AdminHomeContentPage() {
         button_text: bannerForm.button_text.trim() || null,
         button_url: bannerForm.button_url.trim() || null,
         news_url: null,
+        start_date: bannerForm.start_date || null,
+        end_date: bannerForm.end_date || null,
         display_order: bannerForm.display_order,
         is_active: bannerForm.is_active,
       };
@@ -452,6 +479,11 @@ export default function AdminHomeContentPage() {
     event.preventDefault();
 
     if (savingNews) return;
+
+    if (!isValidDateRange(newsForm.start_date, newsForm.end_date)) {
+      notify('End date must be on or after the start date.', 'error');
+      return;
+    }
 
     if (!newsForm.title.trim()) {
       notify('Please enter the news headline.', 'error');
@@ -483,6 +515,8 @@ export default function AdminHomeContentPage() {
       button_text: null,
       button_url: null,
       news_url: newsForm.news_url.trim() || null,
+      start_date: newsForm.start_date || null,
+      end_date: newsForm.end_date || null,
       display_order: newsForm.display_order,
       is_active: newsForm.is_active,
     };
@@ -787,6 +821,44 @@ export default function AdminHomeContentPage() {
             </div>
 
             <div>
+              <p className="text-xs text-slate-500">
+                Optional schedule. Content is shown through the end date.
+              </p>
+              <div className="mt-2 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelClass} htmlFor="banner_start_date">
+                    Start date (optional)
+                  </label>
+                  <input
+                    id="banner_start_date"
+                    type="date"
+                    className={inputClass}
+                    value={bannerForm.start_date}
+                    max={bannerForm.end_date || undefined}
+                    onChange={(event) =>
+                      updateBanner('start_date', event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="banner_end_date">
+                    End date (optional)
+                  </label>
+                  <input
+                    id="banner_end_date"
+                    type="date"
+                    className={inputClass}
+                    value={bannerForm.end_date}
+                    min={bannerForm.start_date || undefined}
+                    onChange={(event) =>
+                      updateBanner('end_date', event.target.value)
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div>
               <label className={labelClass} htmlFor="banner_order">
                 Display order
               </label>
@@ -882,6 +954,44 @@ export default function AdminHomeContentPage() {
                 }
                 required
               />
+            </div>
+
+            <div>
+              <p className="text-xs text-slate-500">
+                Optional schedule. Content is shown through the end date.
+              </p>
+              <div className="mt-2 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelClass} htmlFor="news_start_date">
+                    Start date (optional)
+                  </label>
+                  <input
+                    id="news_start_date"
+                    type="date"
+                    className={inputClass}
+                    value={newsForm.start_date}
+                    max={newsForm.end_date || undefined}
+                    onChange={(event) =>
+                      updateNews('start_date', event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className={labelClass} htmlFor="news_end_date">
+                    End date (optional)
+                  </label>
+                  <input
+                    id="news_end_date"
+                    type="date"
+                    className={inputClass}
+                    value={newsForm.end_date}
+                    min={newsForm.start_date || undefined}
+                    onChange={(event) =>
+                      updateNews('end_date', event.target.value)
+                    }
+                  />
+                </div>
+              </div>
             </div>
 
             <div>
@@ -1060,6 +1170,14 @@ export default function AdminHomeContentPage() {
                       {item.description && (
                         <p className="mt-1 line-clamp-2 text-sm text-slate-600">
                           {item.description}
+                        </p>
+                      )}
+
+                      {(item.start_date || item.end_date) && (
+                        <p className="mt-2 text-xs text-slate-500">
+                          Schedule: {toDateInputValue(item.start_date) || 'Any time'}
+                          {' - '}
+                          {toDateInputValue(item.end_date) || 'No end date'}
                         </p>
                       )}
 

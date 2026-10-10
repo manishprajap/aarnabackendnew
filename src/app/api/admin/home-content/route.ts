@@ -25,6 +25,8 @@ type ParsedContent = {
   buttonText: string | null;
   buttonUrl: string | null;
   newsUrl: string | null;
+  startDate: string | null;
+  endDate: string | null;
   displayOrder: number;
   isActive: 0 | 1;
 };
@@ -117,6 +119,19 @@ const optionalString = (v: unknown) =>
 const clean = (v: unknown): string | null =>
   typeof v === 'string' ? v.trim() || null : null;
 
+function isValidDateOnly(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+
+  const [, year, month, day] = match.map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
 /** Validates and normalizes a request body. Shared by POST and PUT. */
 function parseContent(
   body: Record<string, unknown> | null,
@@ -144,6 +159,8 @@ function parseContent(
     'button_text',
     'button_url',
     'news_url',
+    'start_date',
+    'end_date',
   ]) {
     if (!optionalString(body[key])) {
       return { error: `${key} must be a string` };
@@ -173,6 +190,22 @@ function parseContent(
   }
 
   const description = clean(body.description);
+  const startDate = clean(body.start_date);
+  const endDate = clean(body.end_date);
+  if (startDate && !isValidDateOnly(startDate)) {
+    return { error: 'start_date must be a valid YYYY-MM-DD date' };
+  }
+  if (endDate && !isValidDateOnly(endDate)) {
+    return { error: 'end_date must be a valid YYYY-MM-DD date' };
+  }
+  if (startDate && endDate && endDate < startDate) {
+    return { error: 'end_date must be on or after start_date' };
+  }
+
+  const toDatabaseDate = (value: string | null) =>
+    value ? `${value} 00:00:00` : null;
+  const databaseStartDate = toDatabaseDate(startDate);
+  const databaseEndDate = toDatabaseDate(endDate);
   const isActive: 0 | 1 =
     body.is_active === false || body.is_active === 0 ? 0 : 1;
 
@@ -208,6 +241,8 @@ function parseContent(
         buttonText,
         buttonUrl,
         newsUrl: null,
+        startDate: databaseStartDate,
+        endDate: databaseEndDate,
         displayOrder,
         isActive,
       },
@@ -233,6 +268,8 @@ function parseContent(
       buttonText: null,
       buttonUrl: null,
       newsUrl,
+      startDate: databaseStartDate,
+      endDate: databaseEndDate,
       displayOrder,
       isActive,
     },
@@ -258,6 +295,8 @@ export async function GET(req: NextRequest) {
           SELECT
             id, content_type, title, description, media_url, media_type,
             button_text, button_url, news_url, display_order, is_active,
+            DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
+            DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date,
             created_by, created_at, updated_at
           FROM home_content
           ORDER BY content_type ASC, display_order ASC, id DESC
@@ -265,9 +304,13 @@ export async function GET(req: NextRequest) {
       : await db.execute(sql`
           SELECT
             id, content_type, title, description, media_url, media_type,
-            button_text, button_url, news_url, display_order, is_active
+            button_text, button_url, news_url, display_order, is_active,
+            DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date,
+            DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date
           FROM home_content
           WHERE is_active = 1
+            AND (start_date IS NULL OR DATE(start_date) <= CURRENT_DATE())
+            AND (end_date IS NULL OR DATE(end_date) >= CURRENT_DATE())
           ORDER BY content_type ASC, display_order ASC, id DESC
         `);
 
@@ -295,10 +338,12 @@ export async function POST(req: NextRequest) {
     const result = await db.execute(sql`
       INSERT INTO home_content (
         content_type, title, description, media_url, media_type,
-        button_text, button_url, news_url, display_order, is_active, created_by
+        button_text, button_url, news_url, display_order, is_active,
+        start_date, end_date, created_by
       ) VALUES (
         ${c.contentType}, ${c.title}, ${c.description}, ${c.mediaUrl}, ${c.mediaType},
-        ${c.buttonText}, ${c.buttonUrl}, ${c.newsUrl}, ${c.displayOrder}, ${c.isActive}, ${userId}
+        ${c.buttonText}, ${c.buttonUrl}, ${c.newsUrl}, ${c.displayOrder}, ${c.isActive},
+        ${c.startDate}, ${c.endDate}, ${userId}
       )
     `);
 
@@ -347,6 +392,8 @@ export async function PUT(req: NextRequest) {
         button_text = ${c.buttonText},
         button_url = ${c.buttonUrl},
         news_url = ${c.newsUrl},
+        start_date = ${c.startDate},
+        end_date = ${c.endDate},
         display_order = ${c.displayOrder},
         is_active = ${c.isActive},
         updated_at = NOW()
