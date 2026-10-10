@@ -8,20 +8,28 @@ import { isAdminRequest } from '@/lib/adminApi';
 export const dynamic = 'force-dynamic';
 
 type ContentType = 'banner' | 'news';
-type MediaType = 'image' | 'video' | 'text' | 'none';
+
+/**
+ * Must match the DB column exactly:
+ * home_content.media_type = enum('image','video','text') DEFAULT 'text'
+ * 'none' is NEVER stored. It is accepted from the client and mapped to 'text'.
+ */
+type DbMediaType = 'image' | 'video' | 'text';
 
 type ParsedContent = {
   contentType: ContentType;
   title: string;
   description: string | null;
   mediaUrl: string | null;
-  mediaType: MediaType;
+  mediaType: DbMediaType;
   buttonText: string | null;
   buttonUrl: string | null;
   newsUrl: string | null;
   displayOrder: number;
   isActive: 0 | 1;
 };
+
+const ACCEPTED_MEDIA_TYPES = ['image', 'video', 'text', 'none'];
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ success: false, message }, { status });
@@ -31,6 +39,14 @@ const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim());
 const isUploadedMediaPath = (value: string) =>
   /^\/upload\/home-content\/[a-zA-Z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mov)$/i.test(value.trim()) ||
   /^\/uploads\/home-content\/[a-zA-Z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mov)$/i.test(value.trim());
+
+/** Maps any client value ('none', 'text', undefined, ...) to a value the DB enum accepts. */
+function toDbMediaType(value: unknown, hasMediaUrl: boolean): DbMediaType {
+  if (value === 'image' || value === 'video') return value;
+  if (value === 'text' || value === 'none') return 'text';
+  // Not provided: infer from whether a media URL exists
+  return hasMediaUrl ? 'image' : 'text';
+}
 
 /**
  * Drizzle raw-query results differ by driver.
@@ -67,7 +83,12 @@ function getInsertId(result: unknown): number | null {
   return insertId ? Number(insertId) : null;
 }
 
-function requireAdmin(req: NextRequest): null {
+/**
+ * Throws AuthError if the request is not an admin request.
+ * Returns the admin user id when one is available, otherwise null
+ * (created_by is nullable in the table).
+ */
+function requireAdmin(req: NextRequest): number | null {
   if (!isAdminRequest(req)) {
     throw new AuthError('Admin session expired. Please sign in again.');
   }
@@ -131,9 +152,10 @@ function parseContent(
 
   if (
     body.media_type !== undefined &&
-    !['image', 'video', 'none'].includes(body.media_type as string)
+    body.media_type !== null &&
+    !ACCEPTED_MEDIA_TYPES.includes(body.media_type as string)
   ) {
-    return { error: 'media_type must be image, video or none' };
+    return { error: 'media_type must be image, video, text or none' };
   }
 
   if (
@@ -155,17 +177,18 @@ function parseContent(
     body.is_active === false || body.is_active === 0 ? 0 : 1;
 
   if (contentType === 'banner') {
-    const mediaUrl = clean(body.media_url);
-    const mediaType: MediaType =
-      (body.media_type as MediaType | undefined) ??
-      (mediaUrl ? 'image' : 'none');
+    const rawMediaUrl = clean(body.media_url);
+    // 'none' / 'text' / missing -> 'text' (valid DB enum value)
+    const mediaType = toDbMediaType(body.media_type, Boolean(rawMediaUrl));
+    const hasMedia = mediaType === 'image' || mediaType === 'video';
+    const mediaUrl = hasMedia ? rawMediaUrl : null;
     const buttonUrl = clean(body.button_url);
     const buttonText = clean(body.button_text);
 
-    if (mediaType !== 'none' && !mediaUrl) {
+    if (hasMedia && !mediaUrl) {
       return { error: 'Media URL is required for an image/video banner' };
     }
-    if (mediaType !== 'none' && mediaUrl && !isHttpUrl(mediaUrl) && !isUploadedMediaPath(mediaUrl)) {
+    if (hasMedia && mediaUrl && !isHttpUrl(mediaUrl) && !isUploadedMediaPath(mediaUrl)) {
       return { error: 'Banner media must be uploaded or use a valid http:// or https:// URL' };
     }
     if (buttonUrl && !isHttpUrl(buttonUrl)) {
@@ -180,7 +203,7 @@ function parseContent(
         contentType,
         title,
         description,
-        mediaUrl: mediaType === 'none' ? null : mediaUrl,
+        mediaUrl,
         mediaType,
         buttonText,
         buttonUrl,
@@ -206,7 +229,7 @@ function parseContent(
       title,
       description,
       mediaUrl: null,
-      mediaType: 'text',
+      mediaType: 'text', // news is always text-only
       buttonText: null,
       buttonUrl: null,
       newsUrl,
@@ -228,7 +251,7 @@ function handleError(error: unknown) {
 // GET: List all banners and news for the admin page.
 export async function GET(req: NextRequest) {
   try {
-    await requireAdmin(req);
+    requireAdmin(req);
 
     const result = await db.execute(sql`
       SELECT
@@ -251,7 +274,7 @@ export async function GET(req: NextRequest) {
 // POST: Add a banner or a news item.
 export async function POST(req: NextRequest) {
   try {
-    const userId = await requireAdmin(req);
+    const userId = requireAdmin(req);
 
     const body = await readJson<Record<string, unknown>>(req);
     if (!body) return jsonError('Invalid JSON body', 400);
@@ -286,7 +309,7 @@ export async function POST(req: NextRequest) {
 // PUT: Update an existing record. Send id in the JSON body.
 export async function PUT(req: NextRequest) {
   try {
-    await requireAdmin(req);
+    requireAdmin(req);
 
     const body = await readJson<Record<string, unknown>>(req);
     if (!body) return jsonError('Invalid JSON body', 400);
@@ -333,7 +356,7 @@ export async function PUT(req: NextRequest) {
 // PATCH: Toggle active/inactive status with { id, is_active }.
 export async function PATCH(req: NextRequest) {
   try {
-    await requireAdmin(req);
+    requireAdmin(req);
 
     const body = await readJson<{ id?: number; is_active?: boolean }>(req);
     if (!body) return jsonError('Invalid JSON body', 400);
@@ -370,7 +393,7 @@ export async function PATCH(req: NextRequest) {
 // DELETE: Delete using /api/admin/home-content?id=123
 export async function DELETE(req: NextRequest) {
   try {
-    await requireAdmin(req);
+    requireAdmin(req);
 
     const id = Number(req.nextUrl.searchParams.get('id'));
     if (!Number.isInteger(id) || id <= 0) {
