@@ -23,7 +23,7 @@ import {
   whatsappMessages,
 } from '@/db/schema';
 
-import { eq, and, inArray, count, sum } from 'drizzle-orm';
+import { eq, and, inArray, count, sum, sql } from 'drizzle-orm';
 
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { decryptFacebookToken, encryptFacebookToken } from '@/lib/facebook-token';
@@ -506,24 +506,29 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const bannerIdParam = searchParams.get('bannerId');
+    const publishedDate = searchParams.get('date');
+
+    if (publishedDate && !/^\d{4}-\d{2}-\d{2}$/.test(publishedDate)) {
+      return NextResponse.json(
+        { success: false, message: 'date must be in YYYY-MM-DD format' },
+        { status: 400 }
+      );
+    }
 
     /* Find every bannerPublications row for this user (optionally
-       scoped to one banner), grouped by bannerId. */
+       scoped to one banner or publication date), grouped by bannerId. */
 
-    const publicationRows = bannerIdParam
-      ? await db
-          .select()
-          .from(bannerPublications)
-          .where(
-            and(
-              eq(bannerPublications.userId, userId),
-              eq(bannerPublications.bannerId, Number(bannerIdParam))
-            )
-          )
-      : await db
-          .select()
-          .from(bannerPublications)
-          .where(eq(bannerPublications.userId, userId));
+    const filters = [eq(bannerPublications.userId, userId)];
+    if (bannerIdParam && /^\d+$/.test(bannerIdParam)) {
+      filters.push(eq(bannerPublications.bannerId, Number(bannerIdParam)));
+    }
+    if (publishedDate) {
+      filters.push(sql`DATE(${bannerPublications.publishedAt}) = ${publishedDate}`);
+    }
+    const publicationRows = await db
+      .select()
+      .from(bannerPublications)
+      .where(and(...filters));
 
     const bannerIds = Array.from(new Set(publicationRows.map((r) => r.bannerId)));
 
