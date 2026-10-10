@@ -9,7 +9,9 @@ import {
   businessCategories,
 } from '@/db/schema';
 import { corsHeaders } from '@/lib/cors';
-import { eq } from 'drizzle-orm';
+import { AuthError, getUserIdFromRequest } from '@/lib/auth';
+import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
+import { and, eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -493,6 +495,22 @@ export async function POST(req: NextRequest) {
     });
 
   try {
+    let userId: number;
+    try {
+      userId = getUserIdFromRequest(req);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        return json({ success: false, message: error.message }, { status: 401 });
+      }
+      throw error;
+    }
+
+    const subscriptionAccess = await getSubscriptionAccess(userId);
+    if (!subscriptionAccess.allowed) {
+      const denied = subscriptionDeniedResponse(subscriptionAccess);
+      return json(await denied.json(), { status: denied.status });
+    }
+
     if (!process.env.GEMINI_API_KEY) {
       return json(
         {
@@ -568,7 +586,7 @@ export async function POST(req: NextRequest) {
     const result = await db
       .select()
       .from(products)
-      .where(eq(products.id, productId))
+      .where(and(eq(products.id, productId), eq(products.userId, userId)))
       .limit(1);
 
     if (!result.length) {
