@@ -11,8 +11,10 @@ import { isAdminRequest } from "@/lib/adminApi";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const OUTPUT_DIR = path.join(process.cwd(), "public", "uploads", "home-content");
-const MEDIA_ORIGIN = (process.env.NEXT_PUBLIC_MEDIA_URL || "https://aarnexai.com").replace(/\/+$/, "");
+const UPLOAD_BASE_DIR =
+  process.env.UPLOAD_DIR || "/var/www/aarnexai.com/aarnexai-backend/upload";
+const UPLOAD_URL_PREFIX = "/upload";
+const OUTPUT_DIR = path.join(UPLOAD_BASE_DIR, "home-content");
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_REQUEST_BYTES = VIDEO_MAX_BYTES + 1024 * 1024;
@@ -118,7 +120,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      media_url: `${MEDIA_ORIGIN}/uploads/home-content/${fileName}`,
+      media_url: `${UPLOAD_URL_PREFIX}/home-content/${fileName}`,
       media_type: mediaType,
     });
   } catch (error) {

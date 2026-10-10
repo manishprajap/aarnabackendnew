@@ -37,6 +37,7 @@ function jsonError(message: string, status: number) {
 
 const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim());
 const isUploadedMediaPath = (value: string) =>
+  /^\/upload\/home-content\/[a-zA-Z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mov)$/i.test(value.trim()) ||
   /^\/uploads\/home-content\/[a-zA-Z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mov)$/i.test(value.trim());
 
 /**
