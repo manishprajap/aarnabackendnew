@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS `home_content` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `content_type` enum('banner', 'news') NOT NULL,
+  `title` varchar(255) NOT NULL,
+  `description` text,
+  `media_url` varchar(1000),
+  `media_type` enum('image', 'video', 'none') NOT NULL DEFAULT 'none',
+  `button_text` varchar(100),
+  `button_url` varchar(1000),
+  `news_url` varchar(1000),
+  `display_order` int NOT NULL DEFAULT 0,
+  `is_active` boolean NOT NULL DEFAULT true,
+  `start_date` datetime,
+  `end_date` datetime,
+  `created_by` bigint unsigned,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT `home_content_id` PRIMARY KEY (`id`),
+  INDEX `idx_home_content_type_order` (`content_type`, `display_order`),
+  INDEX `idx_home_content_active` (`is_active`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

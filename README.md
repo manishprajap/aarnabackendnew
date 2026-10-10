@@ -38,6 +38,19 @@ FRONTEND_URL=https://your-domain.com
 ```
 
 Apply the `drizzle/0005_google_business.sql` migration, then enable the Business Profile API, My Business Account Management API, and the exact callback URL in Google Cloud Console. The callback stores tokens only in the server database; they are never returned by the status endpoint.
+
+## Admin homepage content
+
+Apply `drizzle/0008_home_content.sql` to the production database before using the Admin Homepage Content page. The migration creates the `home_content` table used by `GET /api/admin/home-content` and the related create, update, toggle, and delete operations.
+
+For example, with the production database selected:
+
+```sh
+mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0008_home_content.sql
+```
+
+Back up the database before applying schema changes. If `home_content` already exists, verify its columns and `media_type` enum match this migration before deploying.
+
 ## YouTube and LinkedIn OAuth
 
 Create the OAuth applications in Google Cloud Console and the LinkedIn Developer Portal. Client secrets are provider-issued credentials and must not be committed or returned by an API response.

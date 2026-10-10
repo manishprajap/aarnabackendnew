@@ -1,10 +1,20 @@
 
 import { NextRequest, NextResponse } from "next/server";
+import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { products } from "@/db/schema";
 import { getUserIdFromRequest, AuthError } from "@/lib/auth";
 
 export const runtime = "nodejs";
+
+const MEDIA_ORIGIN =
+  process.env.NEXT_PUBLIC_MEDIA_URL || "https://aarnexai.com";
+
+function toFullUrl(path: string | null): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${MEDIA_ORIGIN}${path.startsWith("/") ? "" : "/"}${path}`;
+}
 
 async function getProductRequestBody(
   request: NextRequest
@@ -30,6 +40,48 @@ async function getProductRequestBody(
     return body as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const userId = getUserIdFromRequest(request);
+    const userProducts = await db
+      .select({
+        id: products.id,
+        productName: products.title,
+        originalImageUrl: products.originalImageUrl,
+        cleanImageUrl: products.cleanImageUrl,
+        description: products.description,
+        price: products.price,
+        status: products.status,
+        createdAt: products.createdAt,
+      })
+      .from(products)
+      .where(eq(products.userId, Number(userId)))
+      .orderBy(desc(products.createdAt), desc(products.id));
+
+    return NextResponse.json({
+      success: true,
+      products: userProducts.map((product) => ({
+        ...product,
+        originalImageUrl: toFullUrl(product.originalImageUrl),
+        cleanImageUrl: toFullUrl(product.cleanImageUrl),
+      })),
+    });
+  } catch (error) {
+    if (error instanceof AuthError) {
+      return NextResponse.json(
+        { success: false, message: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
+    console.error("GET /api/userproduct error:", error);
+    return NextResponse.json(
+      { success: false, message: "Failed to fetch products" },
+      { status: 500 }
+    );
   }
 }
 
