@@ -286,7 +286,7 @@ export const homeContent = mysqlTable('home_content', {
   title: varchar('title', { length: 255 }).notNull(),
   description: text('description'),
   mediaUrl: varchar('media_url', { length: 1000 }),
-  mediaType: mysqlEnum('media_type', ['image', 'video', 'none']).notNull().default('none'),
+  mediaType: mysqlEnum('media_type', ['image', 'video', 'text', 'none']).notNull().default('text'),
   buttonText: varchar('button_text', { length: 100 }),
   buttonUrl: varchar('button_url', { length: 1000 }),
   newsUrl: varchar('news_url', { length: 1000 }),

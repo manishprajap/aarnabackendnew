@@ -2,13 +2,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from 'drizzle-orm';
 import { db } from '@/db';
-import { AuthError, getUserIdFromRequest } from '@/lib/auth';
+import { AuthError } from '@/lib/auth';
 import { isAdminRequest } from '@/lib/adminApi';
 
 export const dynamic = 'force-dynamic';
 
 type ContentType = 'banner' | 'news';
-type MediaType = 'image' | 'video' | 'none';
+type MediaType = 'image' | 'video' | 'text' | 'none';
 
 type ParsedContent = {
   contentType: ContentType;
@@ -22,14 +22,6 @@ type ParsedContent = {
   displayOrder: number;
   isActive: 0 | 1;
 };
-
-/** Thrown when the user is logged in but is not an admin (403, not 401). */
-class ForbiddenError extends Error {
-  constructor(message = 'Admin access required') {
-    super(message);
-    this.name = 'ForbiddenError';
-  }
-}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ success: false, message }, { status });
@@ -72,29 +64,12 @@ function getInsertId(result: unknown): number | null {
   return insertId ? Number(insertId) : null;
 }
 
-async function requireAdmin(req: NextRequest): Promise<number | null> {
-  if (isAdminRequest(req)) {
-    return null;
+function requireAdmin(req: NextRequest): null {
+  if (!isAdminRequest(req)) {
+    throw new AuthError('Admin session expired. Please sign in again.');
   }
 
-  // Throws AuthError (-> 401) when the user is not logged in.
-  const userId = await getUserIdFromRequest(req);
-
-  const result = await db.execute(sql`
-    SELECT role
-    FROM users
-    WHERE id = ${userId}
-    LIMIT 1
-  `);
-
-  const rows = normalizeRows<{ role: string | null }>(result);
-  const role = rows[0]?.role?.toLowerCase();
-
-  if (role !== 'admin') {
-    throw new ForbiddenError();
-  }
-
-  return userId;
+  return null;
 }
 
 async function readJson<T>(req: NextRequest): Promise<T | null> {
@@ -228,7 +203,7 @@ function parseContent(
       title,
       description,
       mediaUrl: null,
-      mediaType: 'none',
+      mediaType: 'text',
       buttonText: null,
       buttonUrl: null,
       newsUrl,
@@ -239,9 +214,6 @@ function parseContent(
 }
 
 function handleError(error: unknown) {
-  if (error instanceof ForbiddenError) {
-    return jsonError(error.message, 403);
-  }
   if (error instanceof AuthError) {
     return jsonError(error.message, 401);
   }

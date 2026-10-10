@@ -5,7 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { API_URL, NEXT_PUBLIC_BASE_PATH } from '@/lib/config';
 
 type ContentType = 'banner' | 'news';
-type MediaType = 'image' | 'video' | 'none';
+type MediaType = 'image' | 'video' | 'text' | 'none';
 
 interface HomeContent {
   id: number;

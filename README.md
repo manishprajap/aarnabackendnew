@@ -41,15 +41,16 @@ Apply the `drizzle/0005_google_business.sql` migration, then enable the Business
 
 ## Admin homepage content
 
-Apply `drizzle/0008_home_content.sql` to the production database before using the Admin Homepage Content page. The migration creates the `home_content` table used by `GET /api/admin/home-content` and the related create, update, toggle, and delete operations.
+Apply `drizzle/0008_home_content.sql` and then `drizzle/0009_repair_home_content.sql` to the production database before using the Admin Homepage Content page. The repair migration creates the table if missing, adds `news_url` if needed, and updates `media_type` to support both existing `text` values and the API's `none` value.
 
 For example, with the production database selected:
 
 ```sh
 mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0008_home_content.sql
+mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0009_repair_home_content.sql
 ```
 
-Back up the database before applying schema changes. If `home_content` already exists, verify its columns and `media_type` enum match this migration before deploying.
+Back up the database before applying schema changes. The repair migration preserves existing rows.
 
 ## YouTube and LinkedIn OAuth
 
