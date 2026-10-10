@@ -28,6 +28,9 @@ function jsonError(message: string, status: number) {
 }
 
 const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim());
+const isUploadedMediaPath = (value: string) =>
+  /^\/upload\/home-content\/[a-zA-Z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mov)$/i.test(value.trim()) ||
+  /^\/uploads\/home-content\/[a-zA-Z0-9-]+\.(?:jpg|png|webp|gif|mp4|webm|mov)$/i.test(value.trim());
 
 /**
  * Drizzle raw-query results differ by driver.
@@ -162,8 +165,8 @@ function parseContent(
     if (mediaType !== 'none' && !mediaUrl) {
       return { error: 'Media URL is required for an image/video banner' };
     }
-    if (mediaType !== 'none' && mediaUrl && !isHttpUrl(mediaUrl)) {
-      return { error: 'Media URL must start with http:// or https://' };
+    if (mediaType !== 'none' && mediaUrl && !isHttpUrl(mediaUrl) && !isUploadedMediaPath(mediaUrl)) {
+      return { error: 'Banner media must be uploaded or use a valid http:// or https:// URL' };
     }
     if (buttonUrl && !isHttpUrl(buttonUrl)) {
       return { error: 'Button URL must start with http:// or https://' };

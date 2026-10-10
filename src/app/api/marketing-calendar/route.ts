@@ -64,7 +64,16 @@ export async function GET(request: NextRequest) {
              d.day_number, d.scheduled_date, d.topic_title, d.prompt, d.caption,
              d.hashtags, d.cta, d.image_prompt, d.status AS day_status,
              b.id AS banner_id, b.image_url AS banner_image_url,
-             b.caption AS banner_caption, b.posted AS banner_posted
+             b.caption AS banner_caption,
+             CASE
+               WHEN COALESCE(b.posted, 0) = 1 OR EXISTS (
+                 SELECT 1
+                 FROM banner_publications publication
+                 WHERE publication.banner_id = b.id
+                   AND publication.user_id = ${userId}
+               ) THEN 1
+               ELSE 0
+             END AS banner_posted
       FROM customer_marketing_plans p
       JOIN customer_marketing_days d ON d.marketing_plan_id = p.id
       LEFT JOIN products product
