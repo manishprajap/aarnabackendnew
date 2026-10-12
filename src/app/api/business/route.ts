@@ -6,6 +6,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { db } from "@/db";
 import { getUserIdFromRequest, AuthError } from "@/lib/auth";
+import { getUploadStoragePath } from "@/lib/uploadStorage";
 import {
   HttpError,
   resolveSelections,
@@ -65,7 +66,7 @@ const GOALS = [
   "Generate Leads", "Increase Sales", "Brand Awareness", "Engagement",
   "Website Traffic", "Local Customers", "Customer Retention",
 ];
-const UPLOAD_DIR = path.join(process.cwd(), "upload");
+const UPLOAD_DIR = getUploadStoragePath();
 const MAX_LOGO_BYTES = 5 * 1024 * 1024;
 const LOGO_EXTENSIONS: Record<string, string> = {
   "image/jpeg": ".jpg",

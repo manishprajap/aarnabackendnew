@@ -7,11 +7,11 @@ import { db } from '@/db';
 import { users, categories } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
+import { getUploadStoragePath } from '@/lib/uploadStorage';
 
 export const runtime = 'nodejs';
 
-// Root-level "upload" folder (project_root/upload), not under public/.
-const UPLOAD_DIR = path.join(process.cwd(), 'upload');
+const UPLOAD_DIR = getUploadStoragePath();
 
 const MAX_LOGO_SIZE_BYTES = 5 * 1024 * 1024; // keep in sync with frontend's MAX_LOGO_SIZE_MB
 

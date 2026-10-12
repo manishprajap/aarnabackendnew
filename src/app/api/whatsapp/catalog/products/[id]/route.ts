@@ -8,18 +8,12 @@ import { whatsappProducts, whatsappCatalogs } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 
 import { getUserIdFromRequest } from "@/lib/auth";
+import { getUploadPublicPath, getUploadStoragePath } from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
-
-// Images are saved on disk here (NOT in the Next.js public folder)
-const UPLOAD_BASE_DIR =
-  process.env.UPLOAD_DIR || "/var/www/aarnexai.com/aarnexai-backend/upload";
-
-// URL prefix stored in DB: /upload/products/<file>
-const UPLOAD_URL_PREFIX = "/upload";
 
 /** Make sure the product exists and belongs to a catalog owned by this user. */
 async function findOwnedProduct(productId: number, userId: number) {
@@ -143,7 +137,7 @@ async function updateProduct(request: NextRequest, ctx: { params: any }) {
         : {}),
     };
 
-    // Optional new image -> UPLOAD_BASE_DIR/products (relative path stored in DB)
+    // Optional new image -> shared nested upload storage (relative path stored in DB)
     if (imageFile) {
       if (!ALLOWED_IMAGE_TYPES.includes(imageFile.type)) {
         return NextResponse.json(
@@ -169,17 +163,14 @@ async function updateProduct(request: NextRequest, ctx: { params: any }) {
           : "jpg";
       const fileName = `${createId()}.${extension}`;
 
-      const dir = path.join(
-        /*turbopackIgnore: true*/ UPLOAD_BASE_DIR,
-        "products"
-      );
+      const dir = getUploadStoragePath("products");
       await fs.mkdir(dir, { recursive: true });
 
       const filePath = path.join(/*turbopackIgnore: true*/ dir, fileName);
       await fs.writeFile(filePath, Buffer.from(await imageFile.arrayBuffer()));
       savedFilePath = filePath;
 
-      updates.imageUrl = `${UPLOAD_URL_PREFIX}/products/${fileName}`;
+      updates.imageUrl = getUploadPublicPath("products", fileName);
     }
 
     // Changed locally, so it needs to be synced to Meta again

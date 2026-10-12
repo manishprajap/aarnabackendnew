@@ -8,14 +8,12 @@ import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { AuthError, getUserIdFromRequest } from "@/lib/auth";
 import { isAdminRequest } from "@/lib/adminApi";
+import { getUploadPublicPath, getUploadStoragePath } from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const UPLOAD_BASE_DIR =
-  process.env.UPLOAD_DIR || "/var/www/aarnexai.com/aarnexai-backend/upload";
-const UPLOAD_URL_PREFIX = "/upload";
-const OUTPUT_DIR = path.join(UPLOAD_BASE_DIR, "home-content");
+const OUTPUT_DIR = getUploadStoragePath("home-content");
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_REQUEST_BYTES = VIDEO_MAX_BYTES + 1024 * 1024;
@@ -121,7 +119,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      media_url: `${UPLOAD_URL_PREFIX}/home-content/${fileName}`,
+      media_url: getUploadPublicPath("home-content", fileName),
       media_type: mediaType,
     });
   } catch (error) {

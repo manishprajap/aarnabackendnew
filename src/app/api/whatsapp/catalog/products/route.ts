@@ -8,18 +8,12 @@ import { whatsappProducts, whatsappCatalogs } from "@/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 
 import { getUserIdFromRequest } from "@/lib/auth";
+import { getUploadPublicPath, getUploadStoragePath } from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5 MB
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
-
-// Images are saved on disk here (NOT in the Next.js public folder)
-const UPLOAD_BASE_DIR =
-  process.env.UPLOAD_DIR || "/var/www/aarnexai.com/aarnexai-backend/upload";
-
-// URL prefix stored in DB: /upload/products/<file>
-const UPLOAD_URL_PREFIX = "/upload";
 
 // Domain root: images are served by Nginx from here (same as banners route)
 const MEDIA_ORIGIN =
@@ -238,7 +232,7 @@ export async function POST(request: NextRequest) {
       .replace(/_/g, " ")
       .toLowerCase();
 
-    // Image upload -> UPLOAD_BASE_DIR/products (relative path stored in DB)
+    // Image upload -> shared nested upload storage (relative path stored in DB)
     let finalImageUrl: string | null = imageUrl || null;
 
     if (imageFile) {
@@ -267,17 +261,14 @@ export async function POST(request: NextRequest) {
           : "jpg";
       const fileName = `${createId()}.${extension}`;
 
-      const uploadDir = path.join(
-        /*turbopackIgnore: true*/ UPLOAD_BASE_DIR,
-        "products"
-      );
+      const uploadDir = getUploadStoragePath("products");
       await fs.mkdir(uploadDir, { recursive: true });
 
       const filePath = path.join(/*turbopackIgnore: true*/ uploadDir, fileName);
       await fs.writeFile(filePath, Buffer.from(await imageFile.arrayBuffer()));
       savedFilePath = filePath;
 
-      finalImageUrl = `${UPLOAD_URL_PREFIX}/products/${fileName}`;
+      finalImageUrl = getUploadPublicPath("products", fileName);
     }
 
     // Keep fields that have no dedicated column

@@ -5,19 +5,17 @@ import { products, banners } from '@/db/schema';
 import { createId } from '@paralleldrive/cuid2';
 
 import fs from 'fs/promises';
-import path from 'path';
 import { corsHeaders } from '@/lib/cors';
+import {
+  getUploadPublicPath,
+  getUploadStoragePath,
+} from '@/lib/uploadStorage';
 
 export const runtime = 'nodejs';
 
 export async function OPTIONS(req: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(req.headers.get('origin')) });
 }
-
-const UPLOAD_BASE_DIR =
-  process.env.UPLOAD_DIR || '/var/www/aarnexai.com/aarnexai-backend/upload';
-
-const UPLOAD_URL_PREFIX = '/upload';
 
 // banners.day is NOT NULL. Day 0 marks "the user's own uploaded image" so it
 // never collides with the generated campaign banners (day 1, 2, 3 ...).
@@ -179,10 +177,7 @@ export async function POST(req: NextRequest) {
     |--------------------------------------------------------------------------
     */
 
-    const uploadDir = path.join(
-      /*turbopackIgnore: true*/ UPLOAD_BASE_DIR,
-      'products'
-    );
+    const uploadDir = getUploadStoragePath('products');
 
     await fs.mkdir(uploadDir, { recursive: true });
 
@@ -227,7 +222,7 @@ export async function POST(req: NextRequest) {
 
     savedFilePath = filePath;
 
-    const imageUrl = `${UPLOAD_URL_PREFIX}/products/${fileName}`;
+    const imageUrl = getUploadPublicPath('products', fileName);
 
     /*
     |--------------------------------------------------------------------------

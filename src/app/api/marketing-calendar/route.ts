@@ -9,6 +9,11 @@ import { db } from "@/db";
 import { AuthError, getUserIdFromRequest } from "@/lib/auth";
 import { insertIdOf, rowsOf } from "@/lib/onboarding";
 import { reserveBannerGeneration, subscriptionDeniedResponse } from "@/lib/subscriptionAccess";
+import {
+  getUploadPublicPath,
+  getUploadStoragePath,
+  UPLOAD_BASE_DIR,
+} from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,8 +21,8 @@ export const maxDuration = 300;
 
 const IMAGE_MODEL = "gemini-3.1-flash-image";
 const INITIAL_BANNER_PROMPT_TYPE = "onboarding_initial_banner";
-const UPLOAD_DIR = path.join(process.cwd(), "upload");
-const OUTPUT_DIR = path.join(process.cwd(), "public", "uploads", "products", "ads");
+const UPLOAD_DIR = getUploadStoragePath();
+const OUTPUT_DIR = getUploadStoragePath("products", "ads");
 const MEDIA_ORIGIN = process.env.NEXT_PUBLIC_MEDIA_URL || "https://aarnexai.com";
 const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY ?? "").trim() });
 
@@ -335,7 +340,7 @@ export async function POST(request: NextRequest) {
       const insert = await tx.execute(sql`
         INSERT INTO products (user_id, original_image_url, title, description, category, prompt_type, status)
         VALUES (
-          ${userId}, ${`/uploads/products/ads/onboarding-pending-${userId}.png`},
+          ${userId}, ${getUploadPublicPath("products", "ads", `onboarding-pending-${userId}.png`)},
           ${businessName}, ${`Marketing calendar banner for ${businessName}`},
           ${categoryName || null}, ${INITIAL_BANNER_PROMPT_TYPE}, 'processing'
         )
@@ -380,7 +385,12 @@ export async function POST(request: NextRequest) {
     let logo: Buffer | null = null;
     let logoMimeType = "";
     if (logoFileName) {
-      logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
+      try {
+        logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+        logo = await readFile(path.join(UPLOAD_BASE_DIR, path.basename(logoFileName)));
+      }
       logoMimeType = getLogoMimeType(logoFileName);
     }
 
@@ -412,7 +422,7 @@ export async function POST(request: NextRequest) {
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `calendar-${userId}-${day}-${randomUUID()}.${extension}`;
-    const imageUrl = `/uploads/products/ads/${fileName}`;
+    const imageUrl = getUploadPublicPath("products", "ads", fileName);
     await mkdir(OUTPUT_DIR, { recursive: true });
     await writeFile(path.join(OUTPUT_DIR, fileName), Buffer.from(imagePart.inlineData.data, "base64"), { flag: "wx" });
 

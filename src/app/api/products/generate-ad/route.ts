@@ -13,6 +13,11 @@ import {
   reserveBannerGeneration,
   subscriptionDeniedResponse,
 } from '@/lib/subscriptionAccess';
+import {
+  getUploadPublicPath,
+  getUploadStoragePath,
+  UPLOAD_BASE_DIR,
+} from '@/lib/uploadStorage';
 
 import fs from 'fs/promises';
 import path from 'path';
@@ -270,7 +275,12 @@ export async function POST(req: NextRequest) {
     }
 
     const relativeImagePath = product.originalImageUrl.replace(/^\/+/, '');
-    const imagePath = path.join(process.cwd(), 'public', relativeImagePath);
+    const uploadRelativePath = relativeImagePath.startsWith('upload/')
+      ? relativeImagePath.slice('upload/'.length)
+      : null;
+    const imagePath = uploadRelativePath
+      ? path.join(UPLOAD_BASE_DIR, uploadRelativePath)
+      : path.join(process.cwd(), 'public', relativeImagePath);
     const imageBuffer = await fs.readFile(imagePath);
     const productBase64 = imageBuffer.toString('base64');
 
@@ -284,7 +294,7 @@ export async function POST(req: NextRequest) {
     let logoImageUrl: string | null = null;
 
     if (logoFile) {
-      const logoDir = path.join(process.cwd(), 'public', 'uploads', 'logos');
+      const logoDir = getUploadStoragePath('logos');
       await fs.mkdir(logoDir, { recursive: true });
 
       // This is just a filename, not a DB id, so createId() is still fine here.
@@ -297,7 +307,7 @@ export async function POST(req: NextRequest) {
 
       logoBase64 = logoBuffer.toString('base64');
       logoMime = logoFile.type;
-      logoImageUrl = `/uploads/logos/${logoFileName}`;
+      logoImageUrl = getUploadPublicPath('logos', logoFileName);
     }
 
     const aspectRatio =
@@ -369,7 +379,7 @@ export async function POST(req: NextRequest) {
     const generatedMime = imagePart.inlineData.mimeType || 'image/png';
     const outExt = generatedMime === 'image/jpeg' ? 'jpg' : generatedMime === 'image/webp' ? 'webp' : 'png';
 
-    const adDir = path.join(process.cwd(), 'public', 'uploads', 'products', 'ads');
+    const adDir = getUploadStoragePath('products', 'ads');
     await fs.mkdir(adDir, { recursive: true });
 
     const adFileName = `${productId}-${creativeId}.${outExt}`;
@@ -377,7 +387,7 @@ export async function POST(req: NextRequest) {
 
     await fs.writeFile(adFilePath, Buffer.from(imagePart.inlineData.data, 'base64'));
 
-    const imageUrl = `/uploads/products/ads/${adFileName}`;
+    const imageUrl = getUploadPublicPath('products', 'ads', adFileName);
 
     await db.update(adCreatives).set({ imageUrl, status: 'done' }).where(eq(adCreatives.id, creativeId));
 

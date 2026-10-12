@@ -11,6 +11,11 @@ import {
 import { corsHeaders } from '@/lib/cors';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
 import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
+import {
+  getUploadPublicPath,
+  getUploadStoragePath,
+  UPLOAD_BASE_DIR,
+} from '@/lib/uploadStorage';
 import { and, eq } from 'drizzle-orm';
 import fs from 'fs/promises';
 import path from 'path';
@@ -26,11 +31,6 @@ export const maxDuration = 120;
 
 const GEMINI_TEXT_MODEL = 'gemini-3.7-flash';
 const GEMINI_IMAGE_LITE_MODEL = 'gemini-3.1-flash-lite-image';
-
-const UPLOAD_BASE_DIR =
-  process.env.UPLOAD_DIR || '/var/www/aarnexai.com/aarnexai-backend/upload';
-
-const UPLOAD_URL_PREFIX = '/upload';
 
 type AspectRatio = '1:1' | '4:5' | '9:16' | '16:9';
 
@@ -388,16 +388,12 @@ async function generateCreativeBanner(
     /*
     |--------------------------------------------------------------------------
     | Save file to the SAME shared upload folder as the original product
-    | image (UPLOAD_BASE_DIR/products/banners), served by Nginx at
-    | UPLOAD_URL_PREFIX ("/upload").
+    | image (UPLOAD_STORAGE_DIR/products/banners), served by Nginx at
+    | UPLOAD_URL_PREFIX.
     |--------------------------------------------------------------------------
     */
 
-    const bannerDir = path.join(
-      /*turbopackIgnore: true*/ UPLOAD_BASE_DIR,
-      'products',
-      'banners'
-    );
+    const bannerDir = getUploadStoragePath('products', 'banners');
 
     await fs.mkdir(bannerDir, { recursive: true });
 
@@ -420,7 +416,7 @@ async function generateCreativeBanner(
     // Root-relative path only — same convention as originalImageUrl in
     // /api/upload. Turned into a full URL later by GET APIs (domain
     // root + this path, NOT the /bizmyntra app path).
-    const imageUrl = `${UPLOAD_URL_PREFIX}/products/banners/${bannerFileName}`;
+    const imageUrl = getUploadPublicPath('products', 'banners', bannerFileName);
 
     const insertResult = await db.insert(banners).values({
       productId,
@@ -632,14 +628,13 @@ export async function POST(req: NextRequest) {
     | Resolve Image Path
     |--------------------------------------------------------------------------
     |
-    | product.originalImageUrl is a root-relative URL like
-    | "/upload/products/xyz.jpg" — strip the leading UPLOAD_URL_PREFIX
-    | and resolve what's left against UPLOAD_BASE_DIR on disk.
+    | product.originalImageUrl uses "/upload/<disk-relative-path>".
+    | Strip only the URL mount prefix so both old and nested paths resolve.
     |
     */
 
     const relativeImagePath = product.originalImageUrl
-      .replace(new RegExp(`^${UPLOAD_URL_PREFIX}/?`), '')
+      .replace(/^\/upload\/?/, '')
       .replace(/^\/+/, '');
 
     const imagePath = path.join(/*turbopackIgnore: true*/ UPLOAD_BASE_DIR, relativeImagePath);

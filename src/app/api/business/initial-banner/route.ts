@@ -8,6 +8,11 @@ import path from "node:path";
 import { db } from "@/db";
 import { AuthError, getUserIdFromRequest } from "@/lib/auth";
 import { insertIdOf, rowsOf } from "@/lib/onboarding";
+import {
+  getUploadPublicPath,
+  getUploadStoragePath,
+  UPLOAD_BASE_DIR,
+} from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,8 +21,8 @@ export const maxDuration = 300;
 const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY ?? "").trim() });
 const IMAGE_MODEL = "gemini-3.1-flash-image";
 const INITIAL_BANNER_PROMPT_TYPE = "onboarding_initial_banner";
-const UPLOAD_DIR = path.join(process.cwd(), "upload");
-const OUTPUT_DIR = path.join(process.cwd(), "public", "uploads", "products", "ads");
+const UPLOAD_DIR = getUploadStoragePath();
+const OUTPUT_DIR = getUploadStoragePath("products", "ads");
 
 type Row = Record<string, unknown>;
 
@@ -125,7 +130,7 @@ export async function POST(request: NextRequest) {
         return { productId: existingProductId, banner: null, complete: false, busy: false };
       }
 
-      const placeholderImage = `/uploads/products/ads/onboarding-pending-${userId}.png`;
+      const placeholderImage = getUploadPublicPath("products", "ads", `onboarding-pending-${userId}.png`);
       const insert = await tx.execute(sql`
         INSERT INTO products (user_id, original_image_url, title, description, category, prompt_type, status)
         VALUES (
@@ -156,7 +161,12 @@ export async function POST(request: NextRequest) {
     let logo: Buffer | null = null;
     let logoMimeType = "";
     if (logoFileName) {
-      logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
+      try {
+        logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+        logo = await readFile(path.join(UPLOAD_BASE_DIR, path.basename(logoFileName)));
+      }
       logoMimeType = getLogoMimeType(logoFileName);
     }
 
@@ -196,7 +206,7 @@ export async function POST(request: NextRequest) {
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `onboarding-${userId}-${randomUUID()}.${extension}`;
-    const imageUrl = `/uploads/products/ads/${fileName}`;
+    const imageUrl = getUploadPublicPath("products", "ads", fileName);
     await mkdir(OUTPUT_DIR, { recursive: true });
     await writeFile(path.join(OUTPUT_DIR, fileName), Buffer.from(imagePart.inlineData.data, "base64"), { flag: "wx" });
 
