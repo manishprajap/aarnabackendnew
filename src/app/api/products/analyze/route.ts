@@ -224,7 +224,7 @@ function buildCreativePrompt(aiData: any, options: BannerOptions): string {
   const categoryLine = options.categoryName ? `Business category: ${options.categoryName}.` : '';
   const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
   const professionalLines = options.professionalPhoto
-    ? getProfessionalBannerInstructions(options.businessType, !!festival)
+    ? getProfessionalBannerInstructions(options.businessType, !!festival, !!options.logo)
     : [];
   const politicalLines = options.professionalPhoto && isPoliticalCategory(options.businessType)
     ? getPoliticalBannerInstructions(options.userPrompt || '')
@@ -351,6 +351,12 @@ async function generateCreativeBanner(
                   inlineData: {
                     mimeType: options.professionalPhoto.mimeType,
                     data: options.professionalPhoto.buffer.toString('base64'),
+                  },
+                }] : []),
+                ...(options.logo ? [{
+                  inlineData: {
+                    mimeType: options.logo.mimeType,
+                    data: options.logo.buffer.toString('base64'),
                   },
                 }] : []),
               ],

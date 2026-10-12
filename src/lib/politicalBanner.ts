@@ -8,7 +8,11 @@ export function isPoliticalCategory(value: unknown): boolean {
   return /\bpolitic(?:s|al|ian)?\b|\belection\b|\bpublic representative\b/i.test(category);
 }
 
-export function getProfessionalBannerInstructions(industry: string, festivalGreeting = false): string[] {
+export function getProfessionalBannerInstructions(
+  industry: string,
+  festivalGreeting = false,
+  hasBusinessLogo = false,
+): string[] {
   const value = industry.toLowerCase();
   const title = /\bpolitic(?:s|al|ian)?\b|\belection\b|\bpublic representative\b/.test(value)
     ? "politician"
@@ -16,10 +20,14 @@ export function getProfessionalBannerInstructions(industry: string, festivalGree
       ? "doctor or healthcare professional"
       : "chartered accountant";
   return [
-    `PROFESSIONAL PORTRAIT: use the supplied ${title} photo prominently and faithfully as the same real person. Preserve facial identity; do not substitute the person, use a stock model, or add extra people.`,
+    `IMAGE REFERENCES: the supplied ${title} portrait is only a person/identity reference. Use this person exactly once as a single prominent portrait in the main banner; preserve their identity and do not duplicate them, crop a second headshot, or place their face in a logo/thumbnail.`,
+    ...(hasBusinessLogo
+      ? ["The separately supplied business logo is a distinct brand asset. Use that exact logo once in the top-left brand area, without replacing it with a face, redrawing it, or inventing another logo."]
+      : ["No business logo image is attached. Do not invent a logo or use the professional portrait as a logo; leave a clean brand area for the real clinic name."]),
     ...(festivalGreeting
       ? [
-        "FESTIVAL BANNER COMPOSITION: create a wide landscape greeting-card banner. Place the real professional portrait large on the right half; place the festival greeting and a short category-appropriate wish clearly in the center-left; reserve a small uncluttered area at top-left for the real clinic/business logo and name.",
+        "FESTIVAL BANNER COMPOSITION: create a premium, polished wide landscape greeting-card design (not a photo of a billboard or storefront). Place the real professional portrait large on the right half; place one clear festival greeting and a short category-appropriate wish in the center-left; reserve a small uncluttered area at top-left for the real clinic/business logo and exact name.",
+        "Use professional clinic-branding quality: balanced spacing, clean typography, a restrained festive color palette, subtle festival motifs, and one strong visual focal point. Avoid clutter, repeated text, unrelated people, stock photos, and multiple versions of the doctor.",
         "Keep the bottom 22% as a simple, empty, full-width dark maroon or deep-navy contact band; do not put artwork, portrait, greeting, text, or decorative objects in this reserved band. The exact address, mobile number, and call-to-action will be added there separately.",
         "Do not draw a top header bar. Keep all festival artwork, portrait, and greeting above the reserved contact band, without overlapping one another.",
         ...(title === "doctor or healthcare professional"
@@ -27,7 +35,7 @@ export function getProfessionalBannerInstructions(industry: string, festivalGree
           : []),
       ]
       : [
-        "Keep a polished, trustworthy professional advertising composition and leave a clear, uncluttered area for the real business logo and name at top-left and a dedicated contact band at the bottom.",
+        "Keep a polished, trustworthy professional advertising composition and leave a clear, uncluttered area for the real business logo and name at top-left and a dedicated contact band at the bottom. Do not use a storefront mockup, collage, or extra portrait.",
       ]),
   ];
 }

@@ -439,7 +439,7 @@ export async function POST(request: NextRequest) {
       `Campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
-      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, !!festival) : []),
+      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, !!festival, !!logo) : []),
       ...getBannerLanguageInstructions(bannerLanguage),
       ...(festival ? getFestivalBannerInstructions(festival, bannerLanguage) : []),
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),

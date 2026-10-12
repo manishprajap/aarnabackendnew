@@ -112,14 +112,12 @@ export async function addBusinessIdentityOverlay(
   const mobile = details.mobile.trim().slice(0, 24) || "Not provided";
   const mobileLabel = details.bannerLanguage === "Hindi" ? "मोबाइल" : "Mobile";
   const callLabel = details.bannerLanguage === "Hindi" ? "अभी कॉल करें" : "CALL NOW";
-  const showPersonName = personLabel && personLabel !== clinicName;
   const brandTextX = details.logo ? Math.round(brandHeight * 0.94) : Math.round(brandHeight * 0.12);
   const brandTextWidth = Math.max(1, brandWidth - brandTextX - Math.round(brandHeight * 0.12));
   const brandNameSize = Math.max(
     12,
     Math.min(36, Math.round(brandHeight * 0.28), Math.floor(brandTextWidth / Math.max(clinicName.length * 0.58, 1))),
   );
-  const brandPersonSize = Math.max(14, Math.min(22, Math.round(brandHeight * 0.17)));
   const longestAddressLine = Math.max(firstAddressLine.length, secondAddressLine.length, 1);
   const addressFontSize = Math.max(
     10,
@@ -136,13 +134,10 @@ export async function addBusinessIdentityOverlay(
   );
   const brandPanel = Buffer.from(`
     <svg width="${brandWidth}" height="${brandHeight}" viewBox="0 0 ${brandWidth} ${brandHeight}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" rx="${Math.round(brandHeight * 0.14)}" fill="#fffaf0" fill-opacity="0.96"/>
-      <text x="${brandTextX}" y="${Math.round(brandHeight * (showPersonName ? 0.45 : 0.58))}"
+      <rect width="100%" height="100%" rx="${Math.round(brandHeight * 0.14)}" fill="#fffaf0"/>
+      <text x="${brandTextX}" y="${Math.round(brandHeight * 0.58)}"
         font-family="Arial, sans-serif" font-size="${brandNameSize}" font-weight="700"
         fill="#10243c">${escapeXml(clinicName)}</text>
-      ${showPersonName ? `<text x="${brandTextX}" y="${Math.round(brandHeight * 0.76)}"
-        font-family="Arial, sans-serif" font-size="${brandPersonSize}" font-weight="500"
-        fill="#334155">${escapeXml(personLabel)}</text>` : ""}
     </svg>
   `);
   const overlays: OverlayOptions[] = [

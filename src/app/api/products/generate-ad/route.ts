@@ -130,13 +130,13 @@ function buildAdPrompt(opts: {
     overlayLines.push(`- Show this exact business address clearly: "${overlay.address}".`);
   }
   if (hasLogo) overlayLines.push('- Place the supplied logo image in a corner as a small, tasteful watermark. Do not distort or recolor the logo.');
+  const festival = festivalName ? detectFestival(new Date().toISOString().slice(0, 10), festivalName) : null;
   const profileInstructions = professionalPhoto
-    ? getProfessionalBannerInstructions(businessType, !!festivalName)
+    ? getProfessionalBannerInstructions(businessType, !!festival, hasLogo)
     : [];
   const politicalInstructions = professionalPhoto && isPoliticalCategory(businessType)
     ? getPoliticalBannerInstructions(conceptPrompt)
     : [];
-  const festival = festivalName ? detectFestival(new Date().toISOString().slice(0, 10), festivalName) : null;
   const festivalInstructions = festival ? getFestivalBannerInstructions(festival, bannerLanguage) : [];
 
   return `
@@ -452,7 +452,7 @@ export async function POST(req: NextRequest) {
         cta,
         address: businessAddress,
       },
-      hasLogo: !!logoBase64,
+      hasLogo: !!businessLogo,
       categoryName,
       businessType: `${business?.industryName || ''} ${categoryName || ''}`,
       professionalPhoto: !!professionalPhoto,
@@ -465,8 +465,13 @@ export async function POST(req: NextRequest) {
       { inlineData: { mimeType: productMime, data: productBase64 } },
     ];
 
-    if (logoBase64) {
-      parts.push({ inlineData: { mimeType: logoMime, data: logoBase64 } });
+    if (businessLogo) {
+      parts.push({
+        inlineData: {
+          mimeType: businessLogo.mimeType,
+          data: businessLogo.buffer.toString('base64'),
+        },
+      });
     }
     if (professionalPhoto) {
       parts.push({
