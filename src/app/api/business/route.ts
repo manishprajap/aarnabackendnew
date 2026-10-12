@@ -6,7 +6,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { db } from "@/db";
 import { getUserIdFromRequest, AuthError } from "@/lib/auth";
-import { getUploadStoragePath } from "@/lib/uploadStorage";
+import { getUploadPublicPath, getUploadStoragePath } from "@/lib/uploadStorage";
+import { isProfessionalPortraitCategory } from "@/lib/politicalBanner";
+import { normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
   HttpError,
   resolveSelections,
@@ -74,6 +76,11 @@ const LOGO_EXTENSIONS: Record<string, string> = {
   "image/webp": ".webp",
   "image/gif": ".gif",
 };
+const PROFILE_PHOTO_EXTENSIONS: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+};
 
 function parseIdList(value: unknown): unknown {
   if (Array.isArray(value)) return value;
@@ -125,6 +132,11 @@ export async function GET(req: NextRequest) {
         email: c.email || "",
         mobile: c.mobile || "",
         businessName: c.business_name || "",
+        address: c.business_address || "",
+        bannerLanguage: normalizeBannerLanguage(c.banner_language),
+        professionalPhotoUrl: c.professional_photo
+          ? getUploadPublicPath("business-profiles", String(c.professional_photo))
+          : "",
         country: c.country || "",
         state: c.state || "",
         city: c.city || "",
@@ -161,10 +173,14 @@ export async function POST(req: NextRequest) {
     step = "parseBody";
     let b: Record<string, unknown>;
     let logoFile: File | null = null;
+    let professionalPhotoFile: File | null = null;
     if (req.headers.get("content-type")?.includes("multipart/form-data")) {
       const form = await req.formData();
       const value = (key: string) => form.get(key)?.toString() ?? "";
       logoFile = form.get("logo") instanceof File ? form.get("logo") as File : null;
+      professionalPhotoFile = form.get("professional_photo") instanceof File
+        ? form.get("professional_photo") as File
+        : null;
       b = {
         name: value("name"),
         email: value("email"),
@@ -173,6 +189,8 @@ export async function POST(req: NextRequest) {
         country: value("country"),
         state: value("state"),
         city: value("city"),
+        address: value("address"),
+        banner_language: value("banner_language"),
         industry_id: value("industry_id"),
         business_category_id: value("business_category_id"),
         service_ids: parseIdList(form.get("service_ids")?.toString()),
@@ -201,6 +219,8 @@ export async function POST(req: NextRequest) {
     const country = str(b.country, 100) || "India";
     const state = str(b.state, 100);
     const city = str(b.city, 100);
+    const businessAddress = str(b.address, 500);
+    const bannerLanguage = normalizeBannerLanguage(b.banner_language);
     const customPrompt = str(b.custom_prompt, 10000);
     const automationMode = b.automation_mode === "MANUAL" ? "MANUAL" : "AUTO";
     const requestedMarketingGoal = str(b.marketing_goal, 100);
@@ -241,6 +261,35 @@ export async function POST(req: NextRequest) {
       automation_mode: automationMode,
     });
 
+    const professionalBusiness = isProfessionalPortraitCategory(`${sel.industry.name} ${sel.category.name}`);
+    if (professionalBusiness && !professionalPhotoFile) {
+      const savedPhoto = rowsOf(await db.execute(sql`
+        SELECT professional_photo FROM users WHERE id = ${userId} LIMIT 1
+      `))[0]?.professional_photo;
+      if (!savedPhoto) {
+        return json({ success: false, error: "Upload a clear professional photo for your banners." }, 422);
+      }
+    }
+
+    let professionalPhotoFilename: string | null = null;
+    if (professionalPhotoFile && professionalPhotoFile.size > 0) {
+      const extension = PROFILE_PHOTO_EXTENSIONS[professionalPhotoFile.type];
+      if (!extension) {
+        return json({ success: false, error: "Professional photo must be a JPG, PNG or WEBP image." }, 400);
+      }
+      if (professionalPhotoFile.size > 10 * 1024 * 1024) {
+        return json({ success: false, error: "Professional photo must be 10 MB or smaller." }, 400);
+      }
+      professionalPhotoFilename = `${userId}-${randomUUID()}${extension}`;
+      const directory = getUploadStoragePath("business-profiles");
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        path.join(directory, professionalPhotoFilename),
+        Buffer.from(await professionalPhotoFile.arrayBuffer()),
+        { flag: "wx" },
+      );
+    }
+
     if (email) {
       step = "emailCheck";
       const dup = rowsOf(
@@ -259,6 +308,9 @@ export async function POST(req: NextRequest) {
           business_name = ${businessName},
           email = COALESCE(${email || null}, email),
           logo = COALESCE(${logoFilename}, logo),
+          professional_photo = COALESCE(${professionalPhotoFilename}, professional_photo),
+          business_address = ${businessAddress || null},
+          banner_language = ${bannerLanguage},
           industry_id = ${sel.industry.id},
           business_category_id = ${sel.category.id},
           business_category = ${sel.category.name},

@@ -7,13 +7,17 @@ import path from "node:path";
 
 import { db } from "@/db";
 import { AuthError, getUserIdFromRequest } from "@/lib/auth";
-import { insertIdOf, rowsOf } from "@/lib/onboarding";
+import { ensureColumns, insertIdOf, rowsOf } from "@/lib/onboarding";
 import {
   getPoliticalBannerInstructions,
   isPoliticalCategory,
+  isProfessionalPortraitCategory,
   validatePoliticianPortrait,
 } from "@/lib/politicalBanner";
+import { getProfessionalBannerInstructions, readProfessionalBannerPhoto } from "@/lib/businessBanner";
+import { getBannerLanguageInstructions, normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
+  addBusinessContactOverlay,
   addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
@@ -74,6 +78,11 @@ export async function POST(request: NextRequest) {
     if (!(process.env.GEMINI_API_KEY ?? "").trim()) {
       return json({ success: false, error: "GEMINI_API_KEY is not configured." }, 500);
     }
+    await ensureColumns("users", {
+      business_address: "VARCHAR(500) NULL",
+      professional_photo: "VARCHAR(255) NULL",
+      banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'",
+    });
     let portrait: File | null;
     try {
       const formData = request.headers.get("content-type")?.includes("multipart/form-data")
@@ -86,6 +95,7 @@ export async function POST(request: NextRequest) {
 
     const profile = rowsOf(await db.execute(sql`
       SELECT u.business_name, u.logo, u.website, u.city, u.state, u.country,
+             u.mobile, u.business_address, u.professional_photo, u.banner_language,
              i.name AS industry_name,
              bc.name AS category_name,
              d.scheduled_date, d.topic_title, d.prompt, d.caption, d.hashtags, d.cta, d.image_prompt,
@@ -109,6 +119,8 @@ export async function POST(request: NextRequest) {
 
     const businessName = stringValue(profile.business_name, 190);
     const categoryName = stringValue(profile.category_name, 100);
+    const bannerLanguage = normalizeBannerLanguage(profile.banner_language);
+    const professionalCategory = isProfessionalPortraitCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
     const politicalCategory = isPoliticalCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
     const topic = [
       profile.topic_title,
@@ -118,8 +130,14 @@ export async function POST(request: NextRequest) {
       profile.image_prompt,
     ].map((value) => stringValue(value, 8000)).join("\n");
     const festival = detectFestival(profile.scheduled_date, topic);
-    if (politicalCategory && !portrait) {
-      return json({ success: false, error: "Upload the politician's portrait to create a political campaign banner." }, 422);
+    let professionalPhoto: { buffer: Buffer; mimeType: string } | null = null;
+    if (professionalCategory) {
+      professionalPhoto = portrait
+        ? { buffer: Buffer.from(await portrait.arrayBuffer()), mimeType: portrait.type }
+        : await readProfessionalBannerPhoto(userId, profile.professional_photo);
+      if (!professionalPhoto) {
+        return json({ success: false, error: "Upload a professional photo in Business Setup before creating this banner." }, 422);
+      }
     }
     const strategyName = stringValue(profile.strategy_name, 100) || "AarnexAi AI-selected strategy";
     const strategyObjective = stringValue(profile.strategy_objective, 1000);
@@ -212,7 +230,9 @@ export async function POST(request: NextRequest) {
       `First-day campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
-      ...(festival ? getFestivalBannerInstructions(festival) : []),
+      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`) : []),
+      ...getBannerLanguageInstructions(bannerLanguage),
+      ...(festival ? getFestivalBannerInstructions(festival, bannerLanguage) : []),
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
       "Use a clean square 1:1 social-media layout with readable typography and a clear visual hierarchy.",
       "Use the exact business name and preserve the supplied logo as-is; do not redraw, distort, or replace it.",
@@ -220,9 +240,9 @@ export async function POST(request: NextRequest) {
     ].filter(Boolean).join("\n");
 
     const parts: Part[] = [{ text: prompt }];
-    if (portrait) {
+    if (professionalPhoto) {
       parts.push({
-        inlineData: { mimeType: portrait.type, data: Buffer.from(await portrait.arrayBuffer()).toString("base64") },
+        inlineData: { mimeType: professionalPhoto.mimeType, data: professionalPhoto.buffer.toString("base64") },
       });
     }
     if (logo) {
@@ -245,7 +265,20 @@ export async function POST(request: NextRequest) {
     }
 
     const rawImage = Buffer.from(imagePart.inlineData.data, "base64");
-    const imageBuffer = festival ? await addFestivalGreetingOverlay(rawImage, festival) : rawImage;
+    const festivalImage = festival ? await addFestivalGreetingOverlay(rawImage, festival, bannerLanguage) : rawImage;
+    const address = [
+      stringValue(profile.business_address, 500),
+      stringValue(profile.city, 100),
+      stringValue(profile.state, 100),
+      stringValue(profile.country, 100),
+    ].filter(Boolean).join(", ");
+    const imageBuffer = professionalCategory
+      ? await addBusinessContactOverlay(festivalImage, {
+          mobile: stringValue(profile.mobile, 24),
+          address,
+          language: bannerLanguage,
+        })
+      : festivalImage;
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `onboarding-${userId}-${randomUUID()}.${extension}`;

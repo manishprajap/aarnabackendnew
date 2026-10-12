@@ -5,6 +5,7 @@ import { db } from '@/db';
 import { users, subscriptions, plans, industries, businessCategories } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
 import { getSubscriptionAccess } from '@/lib/subscriptionAccess';
+import { ensureColumns } from '@/lib/onboarding';
 
 export const runtime = 'nodejs';
 
@@ -43,6 +44,8 @@ export async function GET(req: NextRequest) {
       return json({ error: 'Session expired' }, 401);
     }
 
+    await ensureColumns('users', { banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'" });
+
     const [row] = await db
       .select({
         id: users.id,
@@ -61,6 +64,7 @@ export async function GET(req: NextRequest) {
         city: users.city,
         website: users.website,
         language: users.language,
+        bannerLanguage: users.bannerLanguage,
         logo: users.logo,
       })
       .from(users)

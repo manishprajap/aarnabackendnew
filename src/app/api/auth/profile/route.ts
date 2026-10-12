@@ -6,6 +6,8 @@ import { db } from '@/db';
 import { users, industries, businessCategories } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
+import { ensureColumns } from '@/lib/onboarding';
+import { normalizeBannerLanguage } from '@/lib/bannerLanguage';
 
 export const runtime = 'nodejs';
 
@@ -29,6 +31,7 @@ const profileSchema = z.object({
   website: z.string().trim().max(255).optional(),
   logo: z.string().trim().max(255).optional(),
   language: z.string().trim().max(50).optional(),
+  bannerLanguage: z.enum(['Hindi', 'English']).optional(),
 });
 
 function getAuthenticatedUserId(request: NextRequest) {
@@ -54,6 +57,7 @@ export async function PUT(request: NextRequest) {
   }
 
   try {
+    await ensureColumns('users', { banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'" });
     const parsed = profileSchema.safeParse(await request.json());
 
     if (!parsed.success) {
@@ -96,6 +100,7 @@ export async function PUT(request: NextRequest) {
     if (data.website !== undefined) updates.website = data.website;
     if (data.logo !== undefined) updates.logo = data.logo;
     if (data.language !== undefined) updates.language = data.language;
+    if (data.bannerLanguage !== undefined) updates.bannerLanguage = normalizeBannerLanguage(data.bannerLanguage);
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json(
@@ -123,6 +128,7 @@ export async function PUT(request: NextRequest) {
         website: users.website,
         logo: users.logo,
         language: users.language,
+        bannerLanguage: users.bannerLanguage,
         plan: users.plan,
         credits: users.credits,
       })

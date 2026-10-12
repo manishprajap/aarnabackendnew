@@ -1,4 +1,5 @@
 import sharp from "sharp";
+import type { BannerLanguage } from "@/lib/bannerLanguage";
 
 export type Festival = {
   name: string;
@@ -100,10 +101,14 @@ export function detectFestival(dateValue: unknown, text = ""): Festival | null {
   return dateMatch ?? null;
 }
 
-export function getFestivalBannerInstructions(festival: Festival): string[] {
+export function getFestivalBannerInstructions(
+  festival: Festival,
+  language: BannerLanguage = "English",
+): string[] {
+  const greeting = language === "Hindi" ? festival.hindiGreeting : festival.greeting;
   return [
     `FESTIVAL: This is a ${festival.name} greeting banner. Make the festival the main occasion, using ${festival.visualDirection}.`,
-    `Include the exact prominent greeting "${festival.greeting}" and the exact Hindi greeting "${festival.hindiGreeting}". Keep both readable and spelled exactly.`,
+    `Include the exact prominent greeting "${greeting}". Keep it readable and spelled exactly.`,
     "Create an attractive celebratory greeting-card composition appropriate to the business category, without turning it into an unrelated product sale.",
     "Do not add religious claims, political endorsements, party symbols, invented offers or unrelated religious symbols.",
   ];
@@ -122,23 +127,61 @@ function escapeXml(value: string): string {
   });
 }
 
-export async function addFestivalGreetingOverlay(image: Buffer, festival: Festival): Promise<Buffer> {
+export async function addFestivalGreetingOverlay(
+  image: Buffer,
+  festival: Festival,
+  language: BannerLanguage = "English",
+): Promise<Buffer> {
   const metadata = await sharp(image).metadata();
   if (!metadata.width || !metadata.height) throw new Error("Could not read generated festival banner dimensions.");
 
   const width = metadata.width;
   const stripHeight = Math.min(142, Math.max(96, Math.round(metadata.height * 0.15)));
-  const greetingFontSize = Math.min(44, Math.round(width / Math.max(festival.greeting.length * 0.58, 10)));
-  const hindiFontSize = Math.min(30, Math.round(width / Math.max(festival.hindiGreeting.length * 0.58, 12)));
+  const greeting = language === "Hindi" ? festival.hindiGreeting : festival.greeting;
+  const greetingFontFamily = language === "Hindi"
+    ? "Noto Sans Devanagari, Noto Sans, sans-serif"
+    : "Noto Sans, sans-serif";
+  const greetingFontSize = Math.min(44, Math.round(width / Math.max(greeting.length * 0.58, 10)));
   const svg = Buffer.from(`
     <svg width="${width}" height="${stripHeight}" viewBox="0 0 ${width} ${stripHeight}" xmlns="http://www.w3.org/2000/svg">
       <rect width="100%" height="100%" fill="#10243ccc"/>
       <text x="50%" y="${Math.round(stripHeight * 0.43)}" text-anchor="middle"
-        font-family="Noto Sans, sans-serif" font-size="${greetingFontSize}" font-weight="700"
-        fill="#fff">${escapeXml(festival.greeting)}</text>
-      <text x="50%" y="${Math.round(stripHeight * 0.79)}" text-anchor="middle"
-        font-family="Noto Sans Devanagari, Noto Sans, sans-serif" font-size="${hindiFontSize}" font-weight="600"
-        fill="#ffe6a8">${escapeXml(festival.hindiGreeting)}</text>
+        font-family="${greetingFontFamily}" font-size="${greetingFontSize}" font-weight="700"
+        fill="#fff">${escapeXml(greeting)}</text>
+    </svg>
+  `);
+
+  return sharp(image)
+    .composite([{ input: svg, gravity: "north" }])
+    .toBuffer();
+}
+
+export async function addBusinessContactOverlay(
+  image: Buffer,
+  details: { mobile: string; address: string; language?: BannerLanguage },
+): Promise<Buffer> {
+  const metadata = await sharp(image).metadata();
+  if (!metadata.width || !metadata.height) throw new Error("Could not read generated banner dimensions.");
+
+  const width = metadata.width;
+  const height = Math.min(112, Math.max(76, Math.round(metadata.height * 0.13)));
+  const phone = details.mobile.trim().slice(0, 24);
+  const address = details.address.trim().slice(0, 100);
+  const callLabel = details.language === "Hindi" ? "अभी कॉल करें" : "CALL NOW";
+  const labelSize = Math.max(14, Math.round(width * 0.025));
+  const detailSize = Math.max(12, Math.round(width * 0.019));
+  const svg = Buffer.from(`
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="#10243ce8"/>
+      <rect x="${Math.round(width * 0.035)}" y="${Math.round(height * 0.12)}"
+        width="${Math.round(width * 0.23)}" height="${Math.round(height * 0.36)}" rx="${Math.round(height * 0.12)}"
+        fill="#f39224"/>
+      <text x="${Math.round(width * 0.15)}" y="${Math.round(height * 0.37)}" text-anchor="middle"
+        font-family="Noto Sans Devanagari, Arial, sans-serif" font-size="${labelSize}" font-weight="700" fill="#10243c">${escapeXml(callLabel)}</text>
+      <text x="${Math.round(width * 0.30)}" y="${Math.round(height * 0.36)}"
+        font-family="Arial, sans-serif" font-size="${detailSize}" font-weight="700" fill="#fff">${escapeXml(phone)}</text>
+      <text x="${Math.round(width * 0.035)}" y="${Math.round(height * 0.82)}"
+        font-family="Arial, sans-serif" font-size="${detailSize}" fill="#fff">${escapeXml(address)}</text>
     </svg>
   `);
 

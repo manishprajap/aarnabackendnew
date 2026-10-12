@@ -7,10 +7,26 @@ import {
   banners,
   users,
   businessCategories,
+  industries,
 } from '@/db/schema';
 import { corsHeaders } from '@/lib/cors';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
 import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
+import {
+  addBusinessContactOverlay,
+  addFestivalGreetingOverlay,
+  detectFestival,
+  getFestivalBannerInstructions,
+} from '@/lib/festivalBanner';
+import {
+  getPoliticalBannerInstructions,
+  getProfessionalBannerInstructions,
+  isPoliticalCategory,
+  isProfessionalPortraitCategory,
+  readProfessionalBannerPhoto,
+} from '@/lib/businessBanner';
+import { ensureColumns } from '@/lib/onboarding';
+import { getBannerLanguageInstructions, normalizeBannerLanguage } from '@/lib/bannerLanguage';
 import {
   getUploadPublicPath,
   getUploadStoragePath,
@@ -42,10 +58,16 @@ const MAX_PROMPT_LENGTH = 500;
 
 interface BannerOptions {
   categoryName: string | null;
+  businessType: string;
   userPrompt: string | null;
   bannerColor: string | null;
   promptType: string | null;
   aspectRatio: AspectRatio;
+  professionalPhoto: { buffer: Buffer; mimeType: string } | null;
+  mobile: string;
+  address: string;
+  scheduledDate: string | null;
+  bannerLanguage: 'Hindi' | 'English';
 }
 
 /*
@@ -196,6 +218,14 @@ function buildCreativePrompt(aiData: any, options: BannerOptions): string {
       : '';
 
   const categoryLine = options.categoryName ? `Business category: ${options.categoryName}.` : '';
+  const professionalLines = options.professionalPhoto
+    ? getProfessionalBannerInstructions(options.businessType)
+    : [];
+  const politicalLines = options.professionalPhoto && isPoliticalCategory(options.businessType)
+    ? getPoliticalBannerInstructions(options.userPrompt || '')
+    : [];
+  const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
+  const festivalLines = festival ? getFestivalBannerInstructions(festival, options.bannerLanguage) : [];
 
   const brandColorLine = options.bannerColor
     ? `Use ${options.bannerColor} as the dominant accent/background color for text, badges, or backdrop elements — keep it tasteful and premium, not overpowering the product.`
@@ -232,11 +262,16 @@ AD DESIGN:
 ${promptTypeLine}
 ${brandColorLine}
 ${userDirectionLine}
+${getBannerLanguageInstructions(options.bannerLanguage).join('\n')}
+${professionalLines.join('\n')}
+${politicalLines.join('\n')}
+${festivalLines.join('\n')}
+${options.professionalPhoto ? `Show a readable ${options.bannerLanguage === 'Hindi' ? 'अभी कॉल करें' : 'CALL NOW'} button, this exact mobile number "${options.mobile}", and this exact business address "${options.address}".` : ''}
 
 TEXT:
 - Main headline: "${headline}"
 - Add a short supporting marketing sentence.
-- Add a "SHOP NOW" style CTA (or a discount-style CTA if the requested style is an offer/sale theme).
+- Add a ${options.bannerLanguage === 'Hindi' ? '"अभी खरीदें" style CTA in Hindi' : '"SHOP NOW" style CTA'} (or a discount-style CTA if the requested style is an offer/sale theme).
 ${
   features
     ? `- Highlight these visible product features as short callouts: ${features}.`
@@ -305,6 +340,12 @@ async function generateCreativeBanner(
                     data: base64Image,
                   },
                 },
+                ...(options.professionalPhoto ? [{
+                  inlineData: {
+                    mimeType: options.professionalPhoto.mimeType,
+                    data: options.professionalPhoto.buffer.toString('base64'),
+                  },
+                }] : []),
               ],
             },
           ],
@@ -377,7 +418,18 @@ async function generateCreativeBanner(
       extension = 'webp';
     }
 
-    const imageBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    let imageBuffer: Buffer<ArrayBufferLike> = Buffer.from(imagePart.inlineData.data, 'base64');
+    const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
+    if (festival) {
+      imageBuffer = await addFestivalGreetingOverlay(imageBuffer, festival, options.bannerLanguage);
+    }
+    if (options.professionalPhoto) {
+      imageBuffer = await addBusinessContactOverlay(imageBuffer, {
+        mobile: options.mobile,
+        address: options.address,
+        language: options.bannerLanguage,
+      });
+    }
 
     if (!imageBuffer || imageBuffer.length === 0) {
       throw new Error('Generated banner image buffer is empty');
@@ -421,9 +473,11 @@ async function generateCreativeBanner(
     const insertResult = await db.insert(banners).values({
       productId,
       day: 1,
-      theme: themeLabel,
+      theme: festival?.name || themeLabel,
       imageUrl,
-      caption: headline,
+      caption: festival
+        ? `${festival.greeting} · ${festival.hindiGreeting}\n${headline}`
+        : headline,
     });
 
     const bannerId = (insertResult as any)[0]?.insertId as number;
@@ -431,9 +485,11 @@ async function generateCreativeBanner(
     return {
       id: bannerId,
       day: 1,
-      theme: themeLabel,
+      theme: festival?.name || themeLabel,
       imageUrl,
-      caption: headline,
+      caption: festival
+        ? `${festival.greeting} · ${festival.hindiGreeting}\n${headline}`
+        : headline,
       status: 'done' as const,
       error: null,
     };
@@ -615,13 +671,46 @@ export async function POST(req: NextRequest) {
     const bannerColor: string | null = product.bannerColor || null;
     const promptType: string | null = product.promptType || null;
 
+    await ensureColumns("users", {
+      business_address: "VARCHAR(500) NULL",
+      professional_photo: "VARCHAR(255) NULL",
+      banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'",
+    });
     const businessCategoryRows = await db
-      .select({ name: businessCategories.name })
+      .select({
+        name: businessCategories.name,
+        industry: industries.name,
+        mobile: users.mobile,
+        address: users.businessAddress,
+        city: users.city,
+        state: users.state,
+        country: users.country,
+        professionalPhoto: users.professionalPhoto,
+        bannerLanguage: users.bannerLanguage,
+      })
       .from(users)
       .innerJoin(businessCategories, eq(users.businessCategoryId, businessCategories.id))
+      .leftJoin(industries, eq(businessCategories.industryId, industries.id))
       .where(eq(users.id, product.userId))
       .limit(1);
     const businessCategoryName = businessCategoryRows[0]?.name ?? null;
+    const businessDetails = businessCategoryRows[0];
+    const professionalCategory = isProfessionalPortraitCategory(
+      `${businessDetails?.industry || ''} ${businessCategoryName || ''}`,
+    );
+    const businessType = `${businessDetails?.industry || ''} ${businessCategoryName || ''}`;
+    const professionalPhoto = professionalCategory
+      ? await readProfessionalBannerPhoto(product.userId, businessDetails?.professionalPhoto)
+      : null;
+    if (professionalCategory && !professionalPhoto) {
+      throw new Error('Upload a professional photo in Business Setup before generating this banner.');
+    }
+    const businessAddress = [
+      businessDetails?.address,
+      businessDetails?.city,
+      businessDetails?.state,
+      businessDetails?.country,
+    ].filter((part): part is string => typeof part === 'string' && !!part.trim());
 
     /*
     |--------------------------------------------------------------------------
@@ -916,10 +1005,16 @@ Use exactly this structure:
       base64Image,
       {
         categoryName: category,
+        businessType,
         userPrompt,
         bannerColor,
         promptType,
         aspectRatio,
+        professionalPhoto,
+        mobile: String(businessDetails?.mobile || ''),
+        address: businessAddress.join(', '),
+        scheduledDate: new Date().toISOString().slice(0, 10),
+        bannerLanguage: normalizeBannerLanguage(body?.bannerLanguage ?? businessDetails?.bannerLanguage),
       }
     );
 

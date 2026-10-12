@@ -34,11 +34,12 @@ const norm = (s: string) => s.trim().toLowerCase();
 
 /* ============ Schema guard: adds missing columns once per process ============ */
 
-const ensured = new Set<string>();
+const ensured = new Map<string, Set<string>>();
 
 export async function ensureColumns(table: string, wanted: Record<string, string>) {
-  if (ensured.has(table)) return;
   if (!/^[a-z_]+$/.test(table)) throw new Error("Bad table name");
+  const ensuredColumns = ensured.get(table) ?? new Set<string>();
+  if (Object.keys(wanted).every((column) => ensuredColumns.has(column))) return;
 
   const existing = rowsOf(
     await db.execute(sql`
@@ -52,8 +53,9 @@ export async function ensureColumns(table: string, wanted: Record<string, string
     if (!existing.includes(column)) {
       await db.execute(sql.raw(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`));
     }
+    ensuredColumns.add(column);
   }
-  ensured.add(table);
+  ensured.set(table, ensuredColumns);
 }
 
 /**
@@ -67,6 +69,9 @@ export async function ensureSchema() {
     custom_prompt: "TEXT NULL",
     strategy_id: "BIGINT UNSIGNED NULL",
     logo: "VARCHAR(255) NULL",
+    business_address: "VARCHAR(500) NULL",
+    professional_photo: "VARCHAR(255) NULL",
+    banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'",
   });
   await ensureColumns("customer_marketing_plans", {
     marketing_goal: "VARCHAR(100) NULL",

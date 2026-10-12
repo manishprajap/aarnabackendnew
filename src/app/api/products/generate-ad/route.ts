@@ -4,7 +4,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 
 import { db } from '@/db';
-import { products, adPresets, adSuggestions, adCreatives } from '@/db/schema';
+import {
+  products,
+  adPresets,
+  adSuggestions,
+  adCreatives,
+  users,
+  businessCategories,
+  industries,
+} from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
@@ -13,6 +21,21 @@ import {
   reserveBannerGeneration,
   subscriptionDeniedResponse,
 } from '@/lib/subscriptionAccess';
+import {
+  addBusinessContactOverlay,
+  addFestivalGreetingOverlay,
+  detectFestival,
+  getFestivalBannerInstructions,
+} from '@/lib/festivalBanner';
+import {
+  getPoliticalBannerInstructions,
+  getProfessionalBannerInstructions,
+  isPoliticalCategory,
+  isProfessionalPortraitCategory,
+  readProfessionalBannerPhoto,
+} from '@/lib/businessBanner';
+import { ensureColumns } from '@/lib/onboarding';
+import { getBannerLanguageInstructions, normalizeBannerLanguage } from '@/lib/bannerLanguage';
 import {
   getUploadPublicPath,
   getUploadStoragePath,
@@ -80,33 +103,57 @@ function buildAdPrompt(opts: {
     phone?: string | null;
     website?: string | null;
     cta?: string | null;
+    address?: string | null;
   };
   hasLogo: boolean;
+  categoryName: string | null;
+  businessType: string;
+  professionalPhoto: boolean;
+  festivalName: string | null;
+  bannerLanguage: 'Hindi' | 'English';
 }) {
-  const { product, conceptPrompt, aspectRatio, overlay, hasLogo } = opts;
+  const { product, conceptPrompt, aspectRatio, overlay, hasLogo, categoryName, businessType, professionalPhoto, festivalName, bannerLanguage } = opts;
 
   const name = product.title || 'this product';
   const brand = product.brand ? ` by ${product.brand}` : '';
+  const categoryLine = categoryName ? `Business category: ${categoryName}.` : '';
 
   const overlayLines: string[] = [];
 
   if (overlay.price) overlayLines.push(`- Display the price clearly: "${overlay.price}"`);
   if (overlay.discount) overlayLines.push(`- Display a discount badge: "${overlay.discount}"`);
-  if (overlay.cta) overlayLines.push(`- Add a call-to-action button/text: "${overlay.cta}"`);
+  if (overlay.cta) overlayLines.push(`- Add a call-to-action button/text expressing "${overlay.cta}" in ${bannerLanguage}.`);
   if (overlay.phone) overlayLines.push(`- Include the contact number in small text: "${overlay.phone}"`);
   if (overlay.website) overlayLines.push(`- Include the website/handle in small text: "${overlay.website}"`);
+  if (professionalPhoto) {
+    overlayLines.push(`- Add a highly visible "${bannerLanguage === 'Hindi' ? 'अभी कॉल करें' : 'CALL NOW'}" button and the verified contact number "${overlay.phone}".`);
+    overlayLines.push(`- Show this exact business address clearly: "${overlay.address}".`);
+  }
   if (hasLogo) overlayLines.push('- Place the supplied logo image in a corner as a small, tasteful watermark. Do not distort or recolor the logo.');
+  const profileInstructions = professionalPhoto
+    ? getProfessionalBannerInstructions(businessType)
+    : [];
+  const politicalInstructions = professionalPhoto && isPoliticalCategory(businessType)
+    ? getPoliticalBannerInstructions(conceptPrompt)
+    : [];
+  const festival = festivalName ? detectFestival(new Date().toISOString().slice(0, 10), festivalName) : null;
+  const festivalInstructions = festival ? getFestivalBannerInstructions(festival, bannerLanguage) : [];
 
   return `
 Create a professional advertising banner using the supplied reference image(s).
 
 SUBJECT: "${name}"${brand}
+${categoryLine}
 
 PRESERVATION — VERY IMPORTANT:
 - Preserve the exact subject shown in the first reference image (shape, proportions, visible colors, visible text/logo).
 - Do not invent or substitute a different subject.
 
 ${conceptPrompt}
+${getBannerLanguageInstructions(bannerLanguage).join('\n')}
+${profileInstructions.join('\n')}
+${politicalInstructions.join('\n')}
+${festivalInstructions.join('\n')}
 
 OVERLAY ELEMENTS:
 ${overlayLines.length ? overlayLines.join('\n') : '- No price/discount/CTA overlay requested — keep the design clean.'}
@@ -172,6 +219,7 @@ export async function POST(req: NextRequest) {
     const cta = (formData.get('cta') as string | null) || null;
 
     const logoFile = formData.get('logo') as File | null;
+    const requestedBannerLanguage = formData.get('bannerLanguage');
 
     if (!productIdRaw || (!suggestionIdRaw && !presetKey)) {
       return NextResponse.json(
@@ -310,6 +358,49 @@ export async function POST(req: NextRequest) {
       logoImageUrl = getUploadPublicPath('logos', logoFileName);
     }
 
+    await ensureColumns('users', {
+      business_address: 'VARCHAR(500) NULL',
+      professional_photo: 'VARCHAR(255) NULL',
+      banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'",
+    });
+    const businessRows = await db
+      .select({
+        categoryName: businessCategories.name,
+        industryName: industries.name,
+        mobile: users.mobile,
+        address: users.businessAddress,
+        city: users.city,
+        state: users.state,
+        country: users.country,
+        professionalPhoto: users.professionalPhoto,
+        bannerLanguage: users.bannerLanguage,
+      })
+      .from(users)
+      .leftJoin(businessCategories, eq(users.businessCategoryId, businessCategories.id))
+      .leftJoin(industries, eq(businessCategories.industryId, industries.id))
+      .where(eq(users.id, userId))
+      .limit(1);
+    const business = businessRows[0];
+    const categoryName = business?.categoryName ?? null;
+    const professionalCategory = isProfessionalPortraitCategory(`${business?.industryName || ''} ${categoryName || ''}`);
+    const professionalPhoto = professionalCategory
+      ? await readProfessionalBannerPhoto(userId, business?.professionalPhoto)
+      : null;
+    if (professionalCategory && !professionalPhoto) {
+      return NextResponse.json({
+        success: false,
+        message: 'Upload a professional photo in Business Setup before generating this banner.',
+      }, { status: 422 });
+    }
+    const businessPhone = String(business?.mobile || phone || '').trim();
+    const businessAddress = [
+      business?.address,
+      business?.city,
+      business?.state,
+      business?.country,
+    ].filter((part): part is string => typeof part === 'string' && !!part.trim()).join(', ');
+    const festival = detectFestival(new Date().toISOString().slice(0, 10), `${conceptTitle}\n${conceptPrompt}`);
+
     const aspectRatio =
       (platform && PLATFORM_ASPECT_RATIO[platform] && conceptAspectRatio !== '9:16')
         ? PLATFORM_ASPECT_RATIO[platform]
@@ -345,8 +436,20 @@ export async function POST(req: NextRequest) {
       product,
       conceptPrompt,
       aspectRatio,
-      overlay: { price, discount, phone, website, cta },
+      overlay: {
+        price,
+        discount,
+        phone: professionalCategory ? businessPhone : phone,
+        website,
+        cta,
+        address: businessAddress,
+      },
       hasLogo: !!logoBase64,
+      categoryName,
+      businessType: `${business?.industryName || ''} ${categoryName || ''}`,
+      professionalPhoto: !!professionalPhoto,
+      festivalName: festival?.name || null,
+      bannerLanguage: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
     });
 
     const parts: any[] = [
@@ -356,6 +459,14 @@ export async function POST(req: NextRequest) {
 
     if (logoBase64) {
       parts.push({ inlineData: { mimeType: logoMime, data: logoBase64 } });
+    }
+    if (professionalPhoto) {
+      parts.push({
+        inlineData: {
+          mimeType: professionalPhoto.mimeType,
+          data: professionalPhoto.buffer.toString('base64'),
+        },
+      });
     }
 
     const response = await withRetry(() =>
@@ -385,7 +496,16 @@ export async function POST(req: NextRequest) {
     const adFileName = `${productId}-${creativeId}.${outExt}`;
     const adFilePath = path.join(adDir, adFileName);
 
-    await fs.writeFile(adFilePath, Buffer.from(imagePart.inlineData.data, 'base64'));
+    let generatedImage: Buffer<ArrayBufferLike> = Buffer.from(imagePart.inlineData.data, 'base64');
+    if (festival) generatedImage = await addFestivalGreetingOverlay(generatedImage, festival, normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage));
+    if (professionalPhoto) {
+      generatedImage = await addBusinessContactOverlay(generatedImage, {
+        mobile: businessPhone,
+        address: businessAddress,
+        language: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
+      });
+    }
+    await fs.writeFile(adFilePath, generatedImage);
 
     const imageUrl = getUploadPublicPath('products', 'ads', adFileName);
 
