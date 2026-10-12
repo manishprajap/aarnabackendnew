@@ -5,7 +5,8 @@ import { constants } from "node:fs";
 export const UPLOAD_BASE_DIR =
   process.env.UPLOAD_DIR || "/var/www/aarnexai.com/aarnexai-backend/upload";
 
-export const UPLOAD_STORAGE_DIR = path.join(UPLOAD_BASE_DIR, "upload");
+// UPLOAD_BASE_DIR already ends in "upload"; "/upload" is the public URL prefix.
+export const UPLOAD_STORAGE_DIR = UPLOAD_BASE_DIR;
 export const UPLOAD_URL_PREFIX = "/upload";
 
 export function getUploadStoragePath(...segments: string[]): string {
@@ -28,21 +29,21 @@ export async function migrateLegacyGeneratedAdImage(value: unknown): Promise<str
   }
 
   pathname = pathname.replace(/^\/aarnexai-backend(?=\/(?:upload|uploads)\/products\/ads\/)/, "");
-  const duplicateUploadPrefix = "/upload/upload/products/ads/";
-  if (pathname.startsWith(duplicateUploadPrefix)) {
-    const fileName = path.basename(pathname.slice(duplicateUploadPrefix.length));
-    if (!fileName || fileName !== pathname.slice(duplicateUploadPrefix.length)) return raw;
-    return getUploadPublicPath("products", "ads", fileName);
-  }
+  const prefixes = [
+    "/upload/upload/products/ads/",
+    "/upload/products/ads/",
+    "/uploads/products/ads/",
+  ];
+  const matchingPrefix = prefixes.find((prefix) => pathname.startsWith(prefix));
+  if (!matchingPrefix) return raw;
 
-  const legacyPrefix = "/uploads/products/ads/";
-  if (!pathname.startsWith(legacyPrefix)) return raw;
+  const fileName = path.basename(pathname.slice(matchingPrefix.length));
+  if (!fileName || fileName !== pathname.slice(matchingPrefix.length)) return raw;
 
-  const fileName = path.basename(pathname.slice(legacyPrefix.length));
-  if (!fileName || fileName !== pathname.slice(legacyPrefix.length)) return raw;
-
-  const sourcePath = path.join(process.cwd(), "public", "uploads", "products", "ads", fileName);
   const targetPath = getUploadStoragePath("products", "ads", fileName);
+  const sourcePath = matchingPrefix === "/uploads/products/ads/"
+    ? path.join(process.cwd(), "public", "uploads", "products", "ads", fileName)
+    : path.join(UPLOAD_BASE_DIR, "upload", "products", "ads", fileName);
   await mkdir(path.dirname(targetPath), { recursive: true });
   try {
     await copyFile(sourcePath, targetPath, constants.COPYFILE_EXCL);
@@ -51,8 +52,11 @@ export async function migrateLegacyGeneratedAdImage(value: unknown): Promise<str
       return getUploadPublicPath("products", "ads", fileName);
     }
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      console.error(`Legacy generated banner file is missing: ${sourcePath}`);
-      return raw;
+      if (matchingPrefix === "/uploads/products/ads/") {
+        console.error(`Legacy generated banner file is missing: ${sourcePath}`);
+        return raw;
+      }
+      return getUploadPublicPath("products", "ads", fileName);
     }
     throw error;
   }

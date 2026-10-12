@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
         logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
       } catch (error) {
         if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
-        logo = await readFile(path.join(UPLOAD_BASE_DIR, path.basename(logoFileName)));
+        logo = await readFile(path.join(UPLOAD_BASE_DIR, "upload", path.basename(logoFileName)));
       }
       logoMimeType = getLogoMimeType(logoFileName);
     }
