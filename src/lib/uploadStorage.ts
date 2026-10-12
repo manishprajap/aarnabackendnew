@@ -6,7 +6,7 @@ export const UPLOAD_BASE_DIR =
   process.env.UPLOAD_DIR || "/var/www/aarnexai.com/aarnexai-backend/upload";
 
 export const UPLOAD_STORAGE_DIR = path.join(UPLOAD_BASE_DIR, "upload");
-export const UPLOAD_URL_PREFIX = "/upload/upload";
+export const UPLOAD_URL_PREFIX = "/upload";
 
 export function getUploadStoragePath(...segments: string[]): string {
   return path.join(UPLOAD_STORAGE_DIR, ...segments);
@@ -27,7 +27,14 @@ export async function migrateLegacyGeneratedAdImage(value: unknown): Promise<str
     return raw;
   }
 
-  pathname = pathname.replace(/^\/aarnexai-backend(?=\/uploads\/products\/ads\/)/, "");
+  pathname = pathname.replace(/^\/aarnexai-backend(?=\/(?:upload|uploads)\/products\/ads\/)/, "");
+  const duplicateUploadPrefix = "/upload/upload/products/ads/";
+  if (pathname.startsWith(duplicateUploadPrefix)) {
+    const fileName = path.basename(pathname.slice(duplicateUploadPrefix.length));
+    if (!fileName || fileName !== pathname.slice(duplicateUploadPrefix.length)) return raw;
+    return getUploadPublicPath("products", "ads", fileName);
+  }
+
   const legacyPrefix = "/uploads/products/ads/";
   if (!pathname.startsWith(legacyPrefix)) return raw;
 

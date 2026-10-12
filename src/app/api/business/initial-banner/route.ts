@@ -9,6 +9,11 @@ import { db } from "@/db";
 import { AuthError, getUserIdFromRequest } from "@/lib/auth";
 import { insertIdOf, rowsOf } from "@/lib/onboarding";
 import {
+  getPoliticalBannerInstructions,
+  isPoliticalCategory,
+  validatePoliticianPortrait,
+} from "@/lib/politicalBanner";
+import {
   getUploadPublicPath,
   getUploadStoragePath,
   migrateLegacyGeneratedAdImage,
@@ -64,15 +69,26 @@ export async function POST(request: NextRequest) {
     if (!(process.env.GEMINI_API_KEY ?? "").trim()) {
       return json({ success: false, error: "GEMINI_API_KEY is not configured." }, 500);
     }
+    let portrait: File | null;
+    try {
+      const formData = request.headers.get("content-type")?.includes("multipart/form-data")
+        ? await request.formData()
+        : null;
+      portrait = validatePoliticianPortrait(formData?.get("portrait") ?? null);
+    } catch (error) {
+      return json({ success: false, error: error instanceof Error ? error.message : "Invalid politician portrait." }, 422);
+    }
 
     const profile = rowsOf(await db.execute(sql`
       SELECT u.business_name, u.logo, u.website, u.city, u.state, u.country,
+             i.name AS industry_name,
              bc.name AS category_name,
              d.topic_title, d.prompt, d.caption, d.hashtags, d.cta, d.image_prompt,
              CASE WHEN u.automation_mode = 'MANUAL' THEN u.strategy_id ELSE d.strategy_id END AS strategy_id,
              ps.name AS strategy_name, ps.objective AS strategy_objective
       FROM users u
       JOIN business_categories bc ON bc.id = u.business_category_id
+      LEFT JOIN industries i ON i.id = bc.industry_id
       JOIN customer_marketing_plans p ON p.customer_id = u.id
       JOIN customer_marketing_days d ON d.marketing_plan_id = p.id AND d.day_number = 1
       LEFT JOIN promotion_strategies ps
@@ -88,6 +104,10 @@ export async function POST(request: NextRequest) {
 
     const businessName = stringValue(profile.business_name, 190);
     const categoryName = stringValue(profile.category_name, 100);
+    const politicalCategory = isPoliticalCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
+    if (politicalCategory && !portrait) {
+      return json({ success: false, error: "Upload the politician's portrait to create a political campaign banner." }, 422);
+    }
     const strategyName = stringValue(profile.strategy_name, 100) || "AarnexAi AI-selected strategy";
     const strategyObjective = stringValue(profile.strategy_objective, 1000);
     const imagePrompt = stringValue(profile.image_prompt, 8000);
@@ -179,12 +199,18 @@ export async function POST(request: NextRequest) {
       `First-day campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
+      ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
       "Use a clean square 1:1 social-media layout with readable typography and a clear visual hierarchy.",
       "Use the exact business name and preserve the supplied logo as-is; do not redraw, distort, or replace it.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",
     ].filter(Boolean).join("\n");
 
     const parts: Part[] = [{ text: prompt }];
+    if (portrait) {
+      parts.push({
+        inlineData: { mimeType: portrait.type, data: Buffer.from(await portrait.arrayBuffer()).toString("base64") },
+      });
+    }
     if (logo) {
       parts.push({
         inlineData: { mimeType: logoMimeType, data: logo.toString("base64") },
