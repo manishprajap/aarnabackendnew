@@ -22,17 +22,19 @@ import {
   subscriptionDeniedResponse,
 } from '@/lib/subscriptionAccess';
 import {
-  addBusinessContactOverlay,
   addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
 } from '@/lib/festivalBanner';
 import {
+  addBusinessIdentityOverlay,
+  getBusinessBrandingHeaderHeight,
   getPoliticalBannerInstructions,
   getProfessionalBannerInstructions,
   isPoliticalCategory,
   isProfessionalPortraitCategory,
   readProfessionalBannerPhoto,
+  readBusinessLogo,
 } from '@/lib/businessBanner';
 import { ensureColumns } from '@/lib/onboarding';
 import { getBannerLanguageInstructions, normalizeBannerLanguage } from '@/lib/bannerLanguage';
@@ -151,6 +153,7 @@ PRESERVATION — VERY IMPORTANT:
 
 ${conceptPrompt}
 ${getBannerLanguageInstructions(bannerLanguage).join('\n')}
+Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.
 ${profileInstructions.join('\n')}
 ${politicalInstructions.join('\n')}
 ${festivalInstructions.join('\n')}
@@ -367,6 +370,9 @@ export async function POST(req: NextRequest) {
       .select({
         categoryName: businessCategories.name,
         industryName: industries.name,
+        personName: users.name,
+        businessName: users.businessName,
+        logo: users.logo,
         mobile: users.mobile,
         address: users.businessAddress,
         city: users.city,
@@ -382,6 +388,9 @@ export async function POST(req: NextRequest) {
       .limit(1);
     const business = businessRows[0];
     const categoryName = business?.categoryName ?? null;
+    const businessLogo = logoBase64
+      ? { buffer: Buffer.from(logoBase64, 'base64'), mimeType: logoMime }
+      : await readBusinessLogo(userId, business?.logo);
     const professionalCategory = isProfessionalPortraitCategory(`${business?.industryName || ''} ${categoryName || ''}`);
     const professionalPhoto = professionalCategory
       ? await readProfessionalBannerPhoto(userId, business?.professionalPhoto)
@@ -497,13 +506,22 @@ export async function POST(req: NextRequest) {
     const adFilePath = path.join(adDir, adFileName);
 
     let generatedImage: Buffer<ArrayBufferLike> = Buffer.from(imagePart.inlineData.data, 'base64');
-    if (festival) generatedImage = await addFestivalGreetingOverlay(generatedImage, festival, normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage));
-    if (professionalPhoto) {
-      generatedImage = await addBusinessContactOverlay(generatedImage, {
-        mobile: businessPhone,
-        address: businessAddress,
-        language: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
-      });
+    generatedImage = await addBusinessIdentityOverlay(generatedImage, {
+      businessName: String(business?.businessName || ''),
+      personName: String(business?.personName || ''),
+      category: `${business?.industryName || ''} ${categoryName || ''}`,
+      mobile: businessPhone,
+      address: businessAddress,
+      professional: !!professionalPhoto,
+      logo: businessLogo,
+    });
+    if (festival) {
+      generatedImage = await addFestivalGreetingOverlay(
+        generatedImage,
+        festival,
+        normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
+        await getBusinessBrandingHeaderHeight(generatedImage),
+      );
     }
     await fs.writeFile(adFilePath, generatedImage);
 

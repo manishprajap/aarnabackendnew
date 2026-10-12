@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI, type Part } from "@google/genai";
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { db } from "@/db";
@@ -14,10 +14,15 @@ import {
   isProfessionalPortraitCategory,
   validatePoliticianPortrait,
 } from "@/lib/politicalBanner";
-import { getProfessionalBannerInstructions, readProfessionalBannerPhoto } from "@/lib/businessBanner";
+import {
+  addBusinessIdentityOverlay,
+  getBusinessBrandingHeaderHeight,
+  getProfessionalBannerInstructions,
+  readBusinessLogo,
+  readProfessionalBannerPhoto,
+} from "@/lib/businessBanner";
 import { getBannerLanguageInstructions, normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
-  addBusinessContactOverlay,
   addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
@@ -27,7 +32,6 @@ import {
   getUploadPublicPath,
   getUploadStoragePath,
   migrateLegacyGeneratedAdImage,
-  UPLOAD_BASE_DIR,
 } from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
@@ -36,7 +40,6 @@ export const maxDuration = 300;
 
 const IMAGE_MODEL = "gemini-3.1-flash-image";
 const INITIAL_BANNER_PROMPT_TYPE = "onboarding_initial_banner";
-const UPLOAD_DIR = getUploadStoragePath();
 const OUTPUT_DIR = getUploadStoragePath("products", "ads");
 const MEDIA_ORIGIN = process.env.NEXT_PUBLIC_MEDIA_URL || "https://aarnexai.com";
 const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY ?? "").trim() });
@@ -68,20 +71,6 @@ function toFullUrl(value: unknown): string {
   const normalizedPath = `/${raw.replace(/^\/+/, "")}`
     .replace(/^\/aarnexai-backend(?=\/upload\/)/, "");
   return `${MEDIA_ORIGIN}${normalizedPath}`;
-}
-
-function getLogoMimeType(fileName: string): string {
-  switch (path.extname(fileName).toLowerCase()) {
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".webp":
-      return "image/webp";
-    case ".gif":
-      return "image/gif";
-    default:
-      return "image/png";
-  }
 }
 
 async function getAuthenticatedUserId(request: NextRequest): Promise<number> {
@@ -300,7 +289,7 @@ export async function POST(request: NextRequest) {
     }
 
     const profile = rowsOf(await db.execute(sql`
-      SELECT u.business_name, u.logo, u.website, u.city, u.state, u.country,
+      SELECT u.name, u.business_name, u.logo, u.website, u.city, u.state, u.country,
              u.mobile, u.business_address, u.professional_photo, u.banner_language,
              i.name AS industry_name,
              bc.name AS category_name,
@@ -442,18 +431,7 @@ export async function POST(request: NextRequest) {
     }
     creativeId = reservation.creativeId;
 
-    const logoFileName = stringValue(profile.logo, 255).replace(/\\/g, "/").split("/").pop() ?? "";
-    let logo: Buffer | null = null;
-    let logoMimeType = "";
-    if (logoFileName) {
-      try {
-        logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
-      } catch (error) {
-        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
-        logo = await readFile(path.join(UPLOAD_BASE_DIR, "upload", path.basename(logoFileName)));
-      }
-      logoMimeType = getLogoMimeType(logoFileName);
-    }
+    const logo = await readBusinessLogo(userId, profile.logo);
 
     const prompt = [
       "Create one polished, professional social-media marketing banner for this business.",
@@ -469,13 +447,14 @@ export async function POST(request: NextRequest) {
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
       "Use a clean square 1:1 social-media layout with readable typography and clear visual hierarchy.",
       "Use the exact business name and preserve the supplied logo as-is; do not redraw, distort, or replace it.",
+      "Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",
     ].filter(Boolean).join("\n");
     const parts: Part[] = [{ text: prompt }];
     if (professionalPhoto) {
       parts.push({ inlineData: { mimeType: professionalPhoto.mimeType, data: professionalPhoto.buffer.toString("base64") } });
     }
-    if (logo) parts.push({ inlineData: { mimeType: logoMimeType, data: logo.toString("base64") } });
+    if (logo) parts.push({ inlineData: { mimeType: logo.mimeType, data: logo.buffer.toString("base64") } });
 
     const generated = await ai.models.generateContent({
       model: IMAGE_MODEL,
@@ -488,20 +467,29 @@ export async function POST(request: NextRequest) {
     }
 
     const rawImage = Buffer.from(imagePart.inlineData.data, "base64");
-    const festivalImage = festival ? await addFestivalGreetingOverlay(rawImage, festival, bannerLanguage) : rawImage;
     const address = [
       stringValue(profile.business_address, 500),
       stringValue(profile.city, 100),
       stringValue(profile.state, 100),
       stringValue(profile.country, 100),
     ].filter(Boolean).join(", ");
-    const imageBuffer = professionalCategory
-      ? await addBusinessContactOverlay(festivalImage, {
-          mobile: stringValue(profile.mobile, 24),
-          address,
-          language: bannerLanguage,
-        })
-      : festivalImage;
+    let imageBuffer = await addBusinessIdentityOverlay(rawImage, {
+      businessName,
+      personName: stringValue(profile.name, 100),
+      category: `${stringValue(profile.industry_name, 100)} ${categoryName}`,
+      mobile: stringValue(profile.mobile, 24),
+      address,
+      professional: professionalCategory,
+      logo,
+    });
+    if (festival) {
+      imageBuffer = await addFestivalGreetingOverlay(
+        imageBuffer,
+        festival,
+        bannerLanguage,
+        await getBusinessBrandingHeaderHeight(imageBuffer),
+      );
+    }
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `calendar-${userId}-${day}-${randomUUID()}.${extension}`;

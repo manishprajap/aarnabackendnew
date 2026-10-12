@@ -14,10 +14,15 @@ import {
   isProfessionalPortraitCategory,
   validatePoliticianPortrait,
 } from "@/lib/politicalBanner";
-import { getProfessionalBannerInstructions, readProfessionalBannerPhoto } from "@/lib/businessBanner";
+import {
+  addBusinessIdentityOverlay,
+  getBusinessBrandingHeaderHeight,
+  getProfessionalBannerInstructions,
+  readBusinessLogo,
+  readProfessionalBannerPhoto,
+} from "@/lib/businessBanner";
 import { getBannerLanguageInstructions, normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
-  addBusinessContactOverlay,
   addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
@@ -26,7 +31,6 @@ import {
   getUploadPublicPath,
   getUploadStoragePath,
   migrateLegacyGeneratedAdImage,
-  UPLOAD_BASE_DIR,
 } from "@/lib/uploadStorage";
 
 export const runtime = "nodejs";
@@ -36,7 +40,6 @@ export const maxDuration = 300;
 const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY ?? "").trim() });
 const IMAGE_MODEL = "gemini-3.1-flash-image";
 const INITIAL_BANNER_PROMPT_TYPE = "onboarding_initial_banner";
-const UPLOAD_DIR = getUploadStoragePath();
 const OUTPUT_DIR = getUploadStoragePath("products", "ads");
 
 type Row = Record<string, unknown>;
@@ -45,20 +48,6 @@ const json = (data: unknown, status = 200) => NextResponse.json(data, { status }
 
 function stringValue(value: unknown, maxLength: number): string {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
-}
-
-function getLogoMimeType(fileName: string): string {
-  switch (path.extname(fileName).toLowerCase()) {
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".webp":
-      return "image/webp";
-    case ".gif":
-      return "image/gif";
-    default:
-      return "image/png";
-  }
 }
 
 export async function POST(request: NextRequest) {
@@ -94,7 +83,7 @@ export async function POST(request: NextRequest) {
     }
 
     const profile = rowsOf(await db.execute(sql`
-      SELECT u.business_name, u.logo, u.website, u.city, u.state, u.country,
+      SELECT u.name, u.business_name, u.logo, u.website, u.city, u.state, u.country,
              u.mobile, u.business_address, u.professional_photo, u.banner_language,
              i.name AS industry_name,
              bc.name AS category_name,
@@ -198,29 +187,51 @@ export async function POST(request: NextRequest) {
 
     productId = claim.productId;
     if (claim.complete) {
+      const bannerId = Number(claim.banner?.id);
+      let imageUrl = await migrateLegacyGeneratedAdImage(claim.banner?.image_url);
+      const imagePathName = decodeURIComponent(new URL(imageUrl, "https://aarnexai.com").pathname.split("/").pop() ?? "");
+      if (path.basename(imagePathName) !== imagePathName || !/^[-\w.]+$/.test(imagePathName)) {
+        throw new Error("Stored initial banner path is invalid.");
+      }
+      if (!imagePathName.startsWith(`branding-${bannerId}-`)) {
+        const extension = path.extname(imagePathName).toLowerCase();
+        if (![".png", ".jpg", ".jpeg", ".webp"].includes(extension)) {
+          throw new Error("Stored initial banner has an unsupported image format.");
+        }
+        const sourceImage = await readFile(path.join(OUTPUT_DIR, imagePathName));
+        const logo = await readBusinessLogo(userId, profile.logo);
+        const address = [
+          stringValue(profile.business_address, 500),
+          stringValue(profile.city, 100),
+          stringValue(profile.state, 100),
+          stringValue(profile.country, 100),
+        ].filter(Boolean).join(", ");
+        const brandedImage = await addBusinessIdentityOverlay(sourceImage, {
+          businessName,
+          personName: stringValue(profile.name, 100),
+          category: `${stringValue(profile.industry_name, 100)} ${categoryName}`,
+          mobile: stringValue(profile.mobile, 24),
+          address,
+          professional: professionalCategory,
+          logo,
+        });
+        const brandedFileName = `branding-${bannerId}-${userId}${extension}`;
+        await writeFile(path.join(OUTPUT_DIR, brandedFileName), brandedImage, { flag: "w" });
+        imageUrl = getUploadPublicPath("products", "ads", brandedFileName);
+        await db.execute(sql`UPDATE banners SET image_url = ${imageUrl} WHERE id = ${bannerId}`);
+      }
       return json({
         success: true,
         alreadyGenerated: true,
-        bannerId: Number(claim.banner?.id),
-        imageUrl: await migrateLegacyGeneratedAdImage(claim.banner?.image_url),
+        bannerId,
+        imageUrl,
       });
     }
     if (claim.busy) {
       return json({ success: false, error: "The initial banner is already being generated. Please wait a moment and try again." }, 409);
     }
 
-    const logoFileName = stringValue(profile.logo, 255).replace(/\\/g, "/").split("/").pop() ?? "";
-    let logo: Buffer | null = null;
-    let logoMimeType = "";
-    if (logoFileName) {
-      try {
-        logo = await readFile(path.join(UPLOAD_DIR, path.basename(logoFileName)));
-      } catch (error) {
-        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
-        logo = await readFile(path.join(UPLOAD_BASE_DIR, "upload", path.basename(logoFileName)));
-      }
-      logoMimeType = getLogoMimeType(logoFileName);
-    }
+    const logo = await readBusinessLogo(userId, profile.logo);
 
     const prompt = [
       "Create one polished, professional social-media marketing banner for this business.",
@@ -236,6 +247,7 @@ export async function POST(request: NextRequest) {
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
       "Use a clean square 1:1 social-media layout with readable typography and a clear visual hierarchy.",
       "Use the exact business name and preserve the supplied logo as-is; do not redraw, distort, or replace it.",
+      "Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",
     ].filter(Boolean).join("\n");
 
@@ -247,7 +259,7 @@ export async function POST(request: NextRequest) {
     }
     if (logo) {
       parts.push({
-        inlineData: { mimeType: logoMimeType, data: logo.toString("base64") },
+        inlineData: { mimeType: logo.mimeType, data: logo.buffer.toString("base64") },
       });
     }
 
@@ -265,20 +277,29 @@ export async function POST(request: NextRequest) {
     }
 
     const rawImage = Buffer.from(imagePart.inlineData.data, "base64");
-    const festivalImage = festival ? await addFestivalGreetingOverlay(rawImage, festival, bannerLanguage) : rawImage;
     const address = [
       stringValue(profile.business_address, 500),
       stringValue(profile.city, 100),
       stringValue(profile.state, 100),
       stringValue(profile.country, 100),
     ].filter(Boolean).join(", ");
-    const imageBuffer = professionalCategory
-      ? await addBusinessContactOverlay(festivalImage, {
-          mobile: stringValue(profile.mobile, 24),
-          address,
-          language: bannerLanguage,
-        })
-      : festivalImage;
+    let imageBuffer = await addBusinessIdentityOverlay(rawImage, {
+      businessName,
+      personName: stringValue(profile.name, 100),
+      category: `${stringValue(profile.industry_name, 100)} ${categoryName}`,
+      mobile: stringValue(profile.mobile, 24),
+      address,
+      professional: professionalCategory,
+      logo,
+    });
+    if (festival) {
+      imageBuffer = await addFestivalGreetingOverlay(
+        imageBuffer,
+        festival,
+        bannerLanguage,
+        await getBusinessBrandingHeaderHeight(imageBuffer),
+      );
+    }
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `onboarding-${userId}-${randomUUID()}.${extension}`;

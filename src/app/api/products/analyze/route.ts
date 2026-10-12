@@ -13,17 +13,20 @@ import { corsHeaders } from '@/lib/cors';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
 import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
 import {
-  addBusinessContactOverlay,
   addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
 } from '@/lib/festivalBanner';
 import {
+  addBusinessIdentityOverlay,
+  getBusinessBrandingHeaderHeight,
   getPoliticalBannerInstructions,
   getProfessionalBannerInstructions,
   isPoliticalCategory,
   isProfessionalPortraitCategory,
   readProfessionalBannerPhoto,
+  readBusinessLogo,
+  type BusinessLogo,
 } from '@/lib/businessBanner';
 import { ensureColumns } from '@/lib/onboarding';
 import { getBannerLanguageInstructions, normalizeBannerLanguage } from '@/lib/bannerLanguage';
@@ -59,6 +62,9 @@ const MAX_PROMPT_LENGTH = 500;
 interface BannerOptions {
   categoryName: string | null;
   businessType: string;
+  businessName: string;
+  personName: string;
+  logo: BusinessLogo | null;
   userPrompt: string | null;
   bannerColor: string | null;
   promptType: string | null;
@@ -269,8 +275,8 @@ ${festivalLines.join('\n')}
 ${options.professionalPhoto ? `Show a readable ${options.bannerLanguage === 'Hindi' ? 'अभी कॉल करें' : 'CALL NOW'} button, this exact mobile number "${options.mobile}", and this exact business address "${options.address}".` : ''}
 
 TEXT:
-- Main headline: "${headline}"
-- Add a short supporting marketing sentence.
+- Use the idea of this headline, translated naturally into ${options.bannerLanguage}: "${headline}".
+- Add a short supporting marketing sentence in ${options.bannerLanguage}.
 - Add a ${options.bannerLanguage === 'Hindi' ? '"अभी खरीदें" style CTA in Hindi' : '"SHOP NOW" style CTA'} (or a discount-style CTA if the requested style is an offer/sale theme).
 ${
   features
@@ -283,6 +289,7 @@ LAYOUT:
 - Composition and aspect ratio: ${options.aspectRatio}.
 - Modern typography, strong visual hierarchy, readable text.
 - Product should occupy a significant, clearly visible portion of the banner.
+- Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.
 
 DO NOT:
 - Add watermarks, stock-photo logos, or unrelated brand names.
@@ -420,15 +427,22 @@ async function generateCreativeBanner(
 
     let imageBuffer: Buffer<ArrayBufferLike> = Buffer.from(imagePart.inlineData.data, 'base64');
     const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
+    imageBuffer = await addBusinessIdentityOverlay(imageBuffer, {
+      businessName: options.businessName,
+      personName: options.personName,
+      category: options.businessType,
+      mobile: options.mobile,
+      address: options.address,
+      professional: !!options.professionalPhoto,
+      logo: options.logo,
+    });
     if (festival) {
-      imageBuffer = await addFestivalGreetingOverlay(imageBuffer, festival, options.bannerLanguage);
-    }
-    if (options.professionalPhoto) {
-      imageBuffer = await addBusinessContactOverlay(imageBuffer, {
-        mobile: options.mobile,
-        address: options.address,
-        language: options.bannerLanguage,
-      });
+      imageBuffer = await addFestivalGreetingOverlay(
+        imageBuffer,
+        festival,
+        options.bannerLanguage,
+        await getBusinessBrandingHeaderHeight(imageBuffer),
+      );
     }
 
     if (!imageBuffer || imageBuffer.length === 0) {
@@ -680,6 +694,9 @@ export async function POST(req: NextRequest) {
       .select({
         name: businessCategories.name,
         industry: industries.name,
+        personName: users.name,
+        businessName: users.businessName,
+        logo: users.logo,
         mobile: users.mobile,
         address: users.businessAddress,
         city: users.city,
@@ -702,6 +719,7 @@ export async function POST(req: NextRequest) {
     const professionalPhoto = professionalCategory
       ? await readProfessionalBannerPhoto(product.userId, businessDetails?.professionalPhoto)
       : null;
+    const businessLogo = await readBusinessLogo(product.userId, businessDetails?.logo);
     if (professionalCategory && !professionalPhoto) {
       throw new Error('Upload a professional photo in Business Setup before generating this banner.');
     }
@@ -1006,6 +1024,9 @@ Use exactly this structure:
       {
         categoryName: category,
         businessType,
+        businessName: String(businessDetails?.businessName || ''),
+        personName: String(businessDetails?.personName || ''),
+        logo: businessLogo,
         userPrompt,
         bannerColor,
         promptType,
