@@ -14,6 +14,11 @@ import {
   validatePoliticianPortrait,
 } from "@/lib/politicalBanner";
 import {
+  addFestivalGreetingOverlay,
+  detectFestival,
+  getFestivalBannerInstructions,
+} from "@/lib/festivalBanner";
+import {
   getUploadPublicPath,
   getUploadStoragePath,
   migrateLegacyGeneratedAdImage,
@@ -83,7 +88,7 @@ export async function POST(request: NextRequest) {
       SELECT u.business_name, u.logo, u.website, u.city, u.state, u.country,
              i.name AS industry_name,
              bc.name AS category_name,
-             d.topic_title, d.prompt, d.caption, d.hashtags, d.cta, d.image_prompt,
+             d.scheduled_date, d.topic_title, d.prompt, d.caption, d.hashtags, d.cta, d.image_prompt,
              CASE WHEN u.automation_mode = 'MANUAL' THEN u.strategy_id ELSE d.strategy_id END AS strategy_id,
              ps.name AS strategy_name, ps.objective AS strategy_objective
       FROM users u
@@ -105,6 +110,14 @@ export async function POST(request: NextRequest) {
     const businessName = stringValue(profile.business_name, 190);
     const categoryName = stringValue(profile.category_name, 100);
     const politicalCategory = isPoliticalCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
+    const topic = [
+      profile.topic_title,
+      profile.prompt,
+      profile.caption,
+      profile.hashtags,
+      profile.image_prompt,
+    ].map((value) => stringValue(value, 8000)).join("\n");
+    const festival = detectFestival(profile.scheduled_date, topic);
     if (politicalCategory && !portrait) {
       return json({ success: false, error: "Upload the politician's portrait to create a political campaign banner." }, 422);
     }
@@ -199,6 +212,7 @@ export async function POST(request: NextRequest) {
       `First-day campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
+      ...(festival ? getFestivalBannerInstructions(festival) : []),
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
       "Use a clean square 1:1 social-media layout with readable typography and a clear visual hierarchy.",
       "Use the exact business name and preserve the supplied logo as-is; do not redraw, distort, or replace it.",
@@ -230,14 +244,17 @@ export async function POST(request: NextRequest) {
       throw new Error(`Gemini returned no initial banner image. Finish reason: ${generated.candidates?.[0]?.finishReason ?? "unknown"}`);
     }
 
+    const rawImage = Buffer.from(imagePart.inlineData.data, "base64");
+    const imageBuffer = festival ? await addFestivalGreetingOverlay(rawImage, festival) : rawImage;
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `onboarding-${userId}-${randomUUID()}.${extension}`;
     const imageUrl = getUploadPublicPath("products", "ads", fileName);
     await mkdir(OUTPUT_DIR, { recursive: true });
-    await writeFile(path.join(OUTPUT_DIR, fileName), Buffer.from(imagePart.inlineData.data, "base64"), { flag: "wx" });
+    await writeFile(path.join(OUTPUT_DIR, fileName), imageBuffer, { flag: "wx" });
 
     const captionParts = [
+      festival ? `${festival.greeting} · ${festival.hindiGreeting}` : "",
       stringValue(profile.caption, 4000),
       stringValue(profile.hashtags, 1000),
     ].filter(Boolean);
@@ -253,7 +270,7 @@ export async function POST(request: NextRequest) {
       const result = await tx.execute(sql`
         INSERT INTO banners (product_id, day, theme, image_url, caption, posted)
         VALUES (
-          ${productId}, 1, ${strategyName}, ${imageUrl}, ${caption || null}, false
+        ${productId}, 1, ${festival?.name || strategyName}, ${imageUrl}, ${caption || null}, false
         )
       `);
       const id = insertIdOf(result);

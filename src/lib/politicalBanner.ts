@@ -20,11 +20,7 @@ export function getPoliticalBannerInstructions(topic: string): string[] {
     "POLITICAL LEADER BANNER STYLE: create a polished Indian political leader's social-media campaign/festival banner, not a generic business advertisement.",
     "Use the supplied politician portrait as a large, prominent, photorealistic half-body portrait. Preserve the person's exact identity and facial features; do not substitute, beautify into another person, or add other people.",
   ];
-  if (/\b(navratri|diwali|deepavali|govardhan(?:\s+puja)?|puja)\b/i.test(topic)) {
-    instructions.push(
-      "FESTIVAL GREETING: make the named occasion the focus using tasteful Indian festive decoration, colors and motifs. Keep the politician clearly visible and give the artwork a polished greeting-banner composition.",
-    );
-  }
+  if (topic) instructions.push(`Keep the campaign context: ${topic}`);
   instructions.push(
     "Do not invent a party name, party symbol, flag, title, public office, promise, endorsement, slogan or contact detail.",
   );
