@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import sharp, { type OverlayOptions } from "sharp";
+import type { BannerLanguage } from "@/lib/bannerLanguage";
 import {
   getPoliticalBannerInstructions,
   isProfessionalPortraitCategory,
@@ -27,7 +28,9 @@ export interface BusinessIdentityDetails {
   category: string;
   mobile: string;
   address: string;
+  bannerLanguage: BannerLanguage;
   professional: boolean;
+  festival: boolean;
   logo: BusinessLogo | null;
 }
 
@@ -60,12 +63,6 @@ export async function readBusinessLogo(userId: number, fileName: unknown): Promi
   return { buffer, mimeType };
 }
 
-export async function getBusinessBrandingHeaderHeight(image: Buffer): Promise<number> {
-  const metadata = await sharp(image).metadata();
-  if (!metadata.width || !metadata.height) throw new Error("Could not read generated banner dimensions.");
-  return Math.min(132, Math.max(88, Math.round(metadata.height * 0.12)));
-}
-
 function escapeXml(value: string): string {
   return value.replace(/[<>&'"]/g, (character) => {
     const escaped: Record<string, string> = {
@@ -80,11 +77,11 @@ function escapeXml(value: string): string {
 }
 
 function addressLines(value: string): [string, string] {
-  const words = value.trim().slice(0, 140).split(/\s+/).filter(Boolean);
+  const words = value.trim().slice(0, 180).split(/\s+/).filter(Boolean);
   if (words.length < 5) return [words.join(" "), ""];
   let first = "";
   let split = 0;
-  while (split < words.length && `${first} ${words[split]}`.trim().length <= 55) {
+  while (split < words.length && `${first} ${words[split]}`.trim().length <= 90) {
     first = `${first} ${words[split]}`.trim();
     split++;
   }
@@ -98,78 +95,107 @@ export async function addBusinessIdentityOverlay(
   const metadata = await sharp(image).metadata();
   if (!metadata.width || !metadata.height) throw new Error("Could not read generated banner dimensions.");
   const width = metadata.width;
-  const headerHeight = await getBusinessBrandingHeaderHeight(image);
   const safeBusinessName = details.businessName.trim().slice(0, 100);
   const safePersonName = details.personName.trim().slice(0, 80);
   const isDoctor = /\bdoctor\b|\bphysician\b|\bmedical\b|\bhealthcare\b|\bclinic\b/i.test(details.category);
   const personLabel = safePersonName && isDoctor && !/^dr\.?\s/i.test(safePersonName)
     ? `Dr. ${safePersonName}`
     : safePersonName;
-  const primary = details.professional ? personLabel || safeBusinessName : safeBusinessName || personLabel;
-  const secondary = primary === safeBusinessName
-    || (personLabel && safeBusinessName.toLowerCase() === personLabel.toLowerCase())
-    ? details.category.trim().slice(0, 80)
-    : safeBusinessName;
-  const textX = details.logo ? Math.round(headerHeight * 1.12) : Math.round(width * 0.045);
-  const textWidth = Math.max(1, width - textX - Math.round(width * 0.04));
-  const nameSize = Math.max(20, Math.min(40, Math.round(headerHeight * 0.34)));
-  const secondarySize = Math.max(14, Math.min(24, Math.round(headerHeight * 0.20)));
-  const headerSvg = Buffer.from(`
-    <svg width="${width}" height="${headerHeight}" viewBox="0 0 ${width} ${headerHeight}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="#10243cf2"/>
-      <text x="${textX}" y="${Math.round(headerHeight * 0.48)}"
-        font-family="Arial, sans-serif" font-size="${nameSize}" font-weight="700" fill="#fff"
-        textLength="${Math.max(1, Math.round(textWidth * 0.94))}" lengthAdjust="spacingAndGlyphs">${escapeXml(primary || "Business")}</text>
-      <text x="${textX}" y="${Math.round(headerHeight * 0.80)}"
-        font-family="Arial, sans-serif" font-size="${secondarySize}" font-weight="500" fill="#dbeafe"
-        textLength="${Math.max(1, Math.round(textWidth * 0.78))}" lengthAdjust="spacingAndGlyphs">${escapeXml(secondary)}</text>
+  if (!details.professional) return image;
+
+  const footerHeight = Math.min(220, Math.max(170, Math.round(metadata.height * 0.22)));
+  const brandHeight = Math.min(130, Math.max(90, Math.round(metadata.height * 0.14)));
+  const brandWidth = Math.round(width * 0.48);
+  const [firstAddressLine, secondAddressLine] = addressLines(details.address);
+  const sidePadding = Math.round(width * 0.045);
+  const clinicName = safeBusinessName || personLabel || "Business";
+  const mobile = details.mobile.trim().slice(0, 24) || "Not provided";
+  const mobileLabel = details.bannerLanguage === "Hindi" ? "मोबाइल" : "Mobile";
+  const callLabel = details.bannerLanguage === "Hindi" ? "अभी कॉल करें" : "CALL NOW";
+  const showPersonName = personLabel && personLabel !== clinicName;
+  const brandTextX = details.logo ? Math.round(brandHeight * 0.94) : Math.round(brandHeight * 0.12);
+  const brandTextWidth = Math.max(1, brandWidth - brandTextX - Math.round(brandHeight * 0.12));
+  const brandNameSize = Math.max(
+    12,
+    Math.min(36, Math.round(brandHeight * 0.28), Math.floor(brandTextWidth / Math.max(clinicName.length * 0.58, 1))),
+  );
+  const brandPersonSize = Math.max(14, Math.min(22, Math.round(brandHeight * 0.17)));
+  const longestAddressLine = Math.max(firstAddressLine.length, secondAddressLine.length, 1);
+  const addressFontSize = Math.max(
+    10,
+    Math.min(
+      20,
+      Math.round(width * 0.016),
+      Math.floor((width * 0.53) / (longestAddressLine * 0.58)),
+    ),
+  );
+  const contactFontSize = Math.max(18, Math.min(34, Math.round(width * 0.026)));
+  const phoneFontSize = Math.max(
+    15,
+    Math.min(contactFontSize, Math.floor((width * 0.22) / Math.max(mobile.length * 0.58, 1))),
+  );
+  const brandPanel = Buffer.from(`
+    <svg width="${brandWidth}" height="${brandHeight}" viewBox="0 0 ${brandWidth} ${brandHeight}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" rx="${Math.round(brandHeight * 0.14)}" fill="#fffaf0" fill-opacity="0.96"/>
+      <text x="${brandTextX}" y="${Math.round(brandHeight * (showPersonName ? 0.45 : 0.58))}"
+        font-family="Arial, sans-serif" font-size="${brandNameSize}" font-weight="700"
+        fill="#10243c">${escapeXml(clinicName)}</text>
+      ${showPersonName ? `<text x="${brandTextX}" y="${Math.round(brandHeight * 0.76)}"
+        font-family="Arial, sans-serif" font-size="${brandPersonSize}" font-weight="500"
+        fill="#334155">${escapeXml(personLabel)}</text>` : ""}
     </svg>
   `);
-
-  const overlays: OverlayOptions[] = [{ input: headerSvg, left: 0, top: 0 }];
+  const overlays: OverlayOptions[] = [
+    { input: brandPanel, left: Math.round(width * 0.025), top: Math.round(metadata.height * 0.025) },
+  ];
   if (details.logo) {
+    const logoSize = Math.round(brandHeight * 0.72);
     const logoBuffer = await sharp(details.logo.buffer)
       .rotate()
-      .resize(Math.round(headerHeight * 0.72), Math.round(headerHeight * 0.72), { fit: "contain" })
+      .resize(logoSize, logoSize, { fit: "contain" })
       .png()
       .toBuffer();
     overlays.push({
       input: logoBuffer,
-      left: Math.round(headerHeight * 0.14),
-      top: Math.round(headerHeight * 0.14),
+      left: Math.round(width * 0.025) + Math.round(brandHeight * 0.12),
+      top: Math.round(metadata.height * 0.025) + Math.round(brandHeight * 0.14),
     });
   }
-
-  let output = await sharp(image).composite(overlays).toBuffer();
-  if (!details.professional) return output;
-
-  const outputMetadata = await sharp(output).metadata();
-  if (!outputMetadata.width || !outputMetadata.height) throw new Error("Could not read branded banner dimensions.");
-  const footerHeight = Math.min(156, Math.max(104, Math.round(outputMetadata.height * 0.15)));
-  const [firstAddressLine, secondAddressLine] = addressLines(details.address);
-  const callWidth = Math.round(width * 0.25);
-  const contactFontSize = Math.max(15, Math.round(width * 0.021));
-  const addressFontSize = Math.max(12, Math.round(width * 0.016));
+  const festivalStyle = details.festival;
+  const footerColor = festivalStyle ? "#8f1022" : "#10243c";
   const footerSvg = Buffer.from(`
     <svg width="${width}" height="${footerHeight}" viewBox="0 0 ${width} ${footerHeight}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="#10243cf2"/>
-      <rect x="${Math.round(width * 0.035)}" y="${Math.round(footerHeight * 0.12)}"
-        width="${callWidth}" height="${Math.round(footerHeight * 0.40)}" rx="${Math.round(footerHeight * 0.12)}"
-        fill="#f39224"/>
-      <text x="${Math.round(width * 0.035) + callWidth / 2}" y="${Math.round(footerHeight * 0.39)}"
-        text-anchor="middle" font-family="Arial, sans-serif" font-size="${Math.max(15, Math.round(width * 0.025))}"
-        font-weight="700" fill="#10243c">CALL NOW</text>
-      <text x="${Math.round(width * 0.32)}" y="${Math.round(footerHeight * 0.38)}"
-        font-family="Arial, sans-serif" font-size="${contactFontSize}" font-weight="700"
-        fill="#fff">${escapeXml(details.mobile.trim().slice(0, 24))}</text>
-      <text x="${Math.round(width * 0.035)}" y="${Math.round(footerHeight * 0.72)}"
-        font-family="Arial, sans-serif" font-size="${addressFontSize}" fill="#fff">${escapeXml(firstAddressLine)}</text>
-      ${secondAddressLine ? `<text x="${Math.round(width * 0.035)}" y="${Math.round(footerHeight * 0.91)}"
-        font-family="Arial, sans-serif" font-size="${addressFontSize}" fill="#fff">${escapeXml(secondAddressLine)}</text>` : ""}
+      <rect width="100%" height="100%" fill="${footerColor}"/>
+      <path d="M0 0 H${width} V${Math.round(footerHeight * 0.06)} Q${Math.round(width * 0.5)} ${Math.round(footerHeight * 0.20)} 0 ${Math.round(footerHeight * 0.06)} Z" fill="#efbd39"/>
+      <text x="${sidePadding}" y="${Math.round(footerHeight * 0.43)}"
+        font-family="Arial, sans-serif" font-size="${addressFontSize}" font-weight="600"
+        fill="#fff">${escapeXml(firstAddressLine || "Address not provided")}</text>
+      ${secondAddressLine ? `<text x="${sidePadding}" y="${Math.round(footerHeight * 0.70)}"
+        font-family="Arial, sans-serif" font-size="${addressFontSize}" font-weight="600"
+        fill="#fff">${escapeXml(secondAddressLine)}</text>` : ""}
+      <path d="M${Math.round(width * 0.62)} ${Math.round(footerHeight * 0.20)} V${Math.round(footerHeight * 0.84)}" stroke="#f5d36b" stroke-width="2" opacity="0.8"/>
+      <circle cx="${Math.round(width * 0.70)}" cy="${Math.round(footerHeight * 0.50)}" r="${Math.round(footerHeight * 0.22)}" fill="#f5d36b"/>
+      <path d="M${Math.round(width * 0.685)} ${Math.round(footerHeight * 0.40)} q${Math.round(footerHeight * 0.02)} -${Math.round(footerHeight * 0.06)} ${Math.round(footerHeight * 0.07)} 0 l${Math.round(footerHeight * 0.04)} ${Math.round(footerHeight * 0.06)} q${Math.round(footerHeight * 0.02)} ${Math.round(footerHeight * 0.04)} -${Math.round(footerHeight * 0.02)} ${Math.round(footerHeight * 0.06)} q-${Math.round(footerHeight * 0.10)} -${Math.round(footerHeight * 0.05)} -${Math.round(footerHeight * 0.13)} -${Math.round(footerHeight * 0.14)} q${Math.round(footerHeight * 0.02)} -${Math.round(footerHeight * 0.03)} ${Math.round(footerHeight * 0.04)} -${Math.round(footerHeight * 0.02)} Z" fill="#8f1022"/>
+      <text x="${Math.round(width * 0.75)}" y="${Math.round(footerHeight * 0.37)}"
+        font-family="Arial, sans-serif" font-size="${Math.max(14, Math.round(width * 0.018))}" font-weight="600"
+        fill="#fff">${mobileLabel}</text>
+      <text x="${Math.round(width * 0.75)}" y="${Math.round(footerHeight * 0.70)}"
+        font-family="Arial, sans-serif" font-size="${phoneFontSize}" font-weight="700"
+        fill="#f5d36b">${escapeXml(mobile)}</text>
+      <rect x="${Math.round(width * 0.75)}" y="${Math.round(footerHeight * 0.77)}"
+        width="${Math.round(width * 0.22)}" height="${Math.round(footerHeight * 0.19)}"
+        rx="${Math.round(footerHeight * 0.07)}" fill="#f5d36b"/>
+      <text x="${Math.round(width * 0.86)}" y="${Math.round(footerHeight * 0.91)}" text-anchor="middle"
+        font-family="Arial, sans-serif" font-size="${Math.max(12, Math.round(width * 0.015))}" font-weight="700"
+        fill="${footerColor}">${callLabel}</text>
     </svg>
   `);
-  output = await sharp(output).composite([{ input: footerSvg, gravity: "south" }]).toBuffer();
-  return output;
+  return sharp(image)
+    .composite([
+      ...overlays,
+      { input: footerSvg, left: 0, top: metadata.height - footerHeight },
+    ])
+    .toBuffer();
 }
 
 export async function readProfessionalBannerPhoto(userId: number, fileName: unknown): Promise<{

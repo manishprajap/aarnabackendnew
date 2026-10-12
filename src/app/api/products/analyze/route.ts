@@ -13,13 +13,11 @@ import { corsHeaders } from '@/lib/cors';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
 import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
 import {
-  addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
 } from '@/lib/festivalBanner';
 import {
   addBusinessIdentityOverlay,
-  getBusinessBrandingHeaderHeight,
   getPoliticalBannerInstructions,
   getProfessionalBannerInstructions,
   isPoliticalCategory,
@@ -224,13 +222,13 @@ function buildCreativePrompt(aiData: any, options: BannerOptions): string {
       : '';
 
   const categoryLine = options.categoryName ? `Business category: ${options.categoryName}.` : '';
+  const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
   const professionalLines = options.professionalPhoto
-    ? getProfessionalBannerInstructions(options.businessType)
+    ? getProfessionalBannerInstructions(options.businessType, !!festival)
     : [];
   const politicalLines = options.professionalPhoto && isPoliticalCategory(options.businessType)
     ? getPoliticalBannerInstructions(options.userPrompt || '')
     : [];
-  const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
   const festivalLines = festival ? getFestivalBannerInstructions(festival, options.bannerLanguage) : [];
 
   const brandColorLine = options.bannerColor
@@ -289,7 +287,7 @@ LAYOUT:
 - Composition and aspect ratio: ${options.aspectRatio}.
 - Modern typography, strong visual hierarchy, readable text.
 - Product should occupy a significant, clearly visible portion of the banner.
-- Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.
+- Show the exact business or clinic name clearly within the main banner design, not inside a separate top header. Preserve the supplied logo as-is; do not redraw, distort, or replace it.
 
 DO NOT:
 - Add watermarks, stock-photo logos, or unrelated brand names.
@@ -323,7 +321,9 @@ async function generateCreativeBanner(
       throw new Error('Base64 product image is empty');
     }
 
-    const creativePrompt = buildCreativePrompt(aiData, options);
+    const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
+    const aspectRatio = options.professionalPhoto && festival ? '16:9' : options.aspectRatio;
+    const creativePrompt = buildCreativePrompt(aiData, { ...options, aspectRatio });
 
     console.log('Calling Gemini image generation...');
 
@@ -361,7 +361,7 @@ async function generateCreativeBanner(
             responseModalities: ['TEXT', 'IMAGE'],
 
             imageConfig: {
-              aspectRatio: options.aspectRatio,
+              aspectRatio,
               imageSize: '1K',
             },
           },
@@ -426,24 +426,17 @@ async function generateCreativeBanner(
     }
 
     let imageBuffer: Buffer<ArrayBufferLike> = Buffer.from(imagePart.inlineData.data, 'base64');
-    const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
     imageBuffer = await addBusinessIdentityOverlay(imageBuffer, {
       businessName: options.businessName,
       personName: options.personName,
       category: options.businessType,
       mobile: options.mobile,
       address: options.address,
+      bannerLanguage: options.bannerLanguage,
       professional: !!options.professionalPhoto,
+      festival: !!festival,
       logo: options.logo,
     });
-    if (festival) {
-      imageBuffer = await addFestivalGreetingOverlay(
-        imageBuffer,
-        festival,
-        options.bannerLanguage,
-        await getBusinessBrandingHeaderHeight(imageBuffer),
-      );
-    }
 
     if (!imageBuffer || imageBuffer.length === 0) {
       throw new Error('Generated banner image buffer is empty');

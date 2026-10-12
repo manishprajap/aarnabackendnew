@@ -16,14 +16,12 @@ import {
 } from "@/lib/politicalBanner";
 import {
   addBusinessIdentityOverlay,
-  getBusinessBrandingHeaderHeight,
   getProfessionalBannerInstructions,
   readBusinessLogo,
   readProfessionalBannerPhoto,
 } from "@/lib/businessBanner";
 import { getBannerLanguageInstructions, normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
-  addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
 } from "@/lib/festivalBanner";
@@ -212,7 +210,9 @@ export async function POST(request: NextRequest) {
           category: `${stringValue(profile.industry_name, 100)} ${categoryName}`,
           mobile: stringValue(profile.mobile, 24),
           address,
+          bannerLanguage: normalizeBannerLanguage(profile.banner_language),
           professional: professionalCategory,
+          festival: !!detectFestival(profile.scheduled_date, stringValue(profile.topic_title, 255)),
           logo,
         });
         const brandedFileName = `branding-${bannerId}-${userId}${extension}`;
@@ -241,13 +241,12 @@ export async function POST(request: NextRequest) {
       `First-day campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
-      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`) : []),
+      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, !!festival) : []),
       ...getBannerLanguageInstructions(bannerLanguage),
       ...(festival ? getFestivalBannerInstructions(festival, bannerLanguage) : []),
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
-      "Use a clean square 1:1 social-media layout with readable typography and a clear visual hierarchy.",
-      "Use the exact business name and preserve the supplied logo as-is; do not redraw, distort, or replace it.",
-      "Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.",
+      `Use a ${professionalCategory && festival ? "wide landscape 16:9" : "square 1:1"} social-media layout with readable typography and a clear visual hierarchy.`,
+      "Show the exact business or clinic name clearly. Preserve the supplied logo as-is; do not redraw, distort, or replace it.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",
     ].filter(Boolean).join("\n");
 
@@ -268,7 +267,7 @@ export async function POST(request: NextRequest) {
       contents: [{ role: "user", parts }],
       config: {
         responseModalities: ["TEXT", "IMAGE"],
-        imageConfig: { aspectRatio: "1:1", imageSize: "1K" },
+        imageConfig: { aspectRatio: professionalCategory && festival ? "16:9" : "1:1", imageSize: "1K" },
       },
     });
     const imagePart = generated.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data);
@@ -283,23 +282,17 @@ export async function POST(request: NextRequest) {
       stringValue(profile.state, 100),
       stringValue(profile.country, 100),
     ].filter(Boolean).join(", ");
-    let imageBuffer = await addBusinessIdentityOverlay(rawImage, {
+    const imageBuffer = await addBusinessIdentityOverlay(rawImage, {
       businessName,
       personName: stringValue(profile.name, 100),
       category: `${stringValue(profile.industry_name, 100)} ${categoryName}`,
       mobile: stringValue(profile.mobile, 24),
       address,
+      bannerLanguage,
       professional: professionalCategory,
+      festival: !!festival,
       logo,
     });
-    if (festival) {
-      imageBuffer = await addFestivalGreetingOverlay(
-        imageBuffer,
-        festival,
-        bannerLanguage,
-        await getBusinessBrandingHeaderHeight(imageBuffer),
-      );
-    }
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";
     const fileName = `onboarding-${userId}-${randomUUID()}.${extension}`;

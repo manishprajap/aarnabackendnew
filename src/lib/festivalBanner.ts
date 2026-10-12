@@ -1,4 +1,3 @@
-import sharp from "sharp";
 import type { BannerLanguage } from "@/lib/bannerLanguage";
 
 export type Festival = {
@@ -112,47 +111,4 @@ export function getFestivalBannerInstructions(
     "Create an attractive celebratory greeting-card composition appropriate to the business category, without turning it into an unrelated product sale.",
     "Do not add religious claims, political endorsements, party symbols, invented offers or unrelated religious symbols.",
   ];
-}
-
-function escapeXml(value: string): string {
-  return value.replace(/[<>&'"]/g, (character) => {
-    const escaped: Record<string, string> = {
-      "<": "&lt;",
-      ">": "&gt;",
-      "&": "&amp;",
-      "'": "&apos;",
-      '"': "&quot;",
-    };
-    return escaped[character];
-  });
-}
-
-export async function addFestivalGreetingOverlay(
-  image: Buffer,
-  festival: Festival,
-  language: BannerLanguage = "English",
-  topOffset = 0,
-): Promise<Buffer> {
-  if (language === "Hindi") return image;
-
-  const metadata = await sharp(image).metadata();
-  if (!metadata.width || !metadata.height) throw new Error("Could not read generated festival banner dimensions.");
-
-  const width = metadata.width;
-  const stripHeight = Math.min(142, Math.max(96, Math.round(metadata.height * 0.15)));
-  const greeting = festival.greeting;
-  const greetingFontFamily = "Noto Sans, sans-serif";
-  const greetingFontSize = Math.min(44, Math.round(width / Math.max(greeting.length * 0.58, 10)));
-  const svg = Buffer.from(`
-    <svg width="${width}" height="${stripHeight}" viewBox="0 0 ${width} ${stripHeight}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="#10243ccc"/>
-      <text x="50%" y="${Math.round(stripHeight * 0.43)}" text-anchor="middle"
-        font-family="${greetingFontFamily}" font-size="${greetingFontSize}" font-weight="700"
-        fill="#fff">${escapeXml(greeting)}</text>
-    </svg>
-  `);
-
-  return sharp(image)
-    .composite([{ input: svg, left: 0, top: topOffset }])
-    .toBuffer();
 }

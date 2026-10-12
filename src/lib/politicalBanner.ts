@@ -8,7 +8,7 @@ export function isPoliticalCategory(value: unknown): boolean {
   return /\bpolitic(?:s|al|ian)?\b|\belection\b|\bpublic representative\b/i.test(category);
 }
 
-export function getProfessionalBannerInstructions(industry: string): string[] {
+export function getProfessionalBannerInstructions(industry: string, festivalGreeting = false): string[] {
   const value = industry.toLowerCase();
   const title = /\bpolitic(?:s|al|ian)?\b|\belection\b|\bpublic representative\b/.test(value)
     ? "politician"
@@ -16,8 +16,19 @@ export function getProfessionalBannerInstructions(industry: string): string[] {
       ? "doctor or healthcare professional"
       : "chartered accountant";
   return [
-    `PROFESSIONAL PORTRAIT: use the supplied ${title} photo prominently and faithfully as the same real person. Preserve facial identity; do not substitute the person or add extra people.`,
-    "Keep a polished, trustworthy professional advertising composition and leave clear space for contact information.",
+    `PROFESSIONAL PORTRAIT: use the supplied ${title} photo prominently and faithfully as the same real person. Preserve facial identity; do not substitute the person, use a stock model, or add extra people.`,
+    ...(festivalGreeting
+      ? [
+        "FESTIVAL BANNER COMPOSITION: create a wide landscape greeting-card banner. Place the real professional portrait large on the right half; place the festival greeting and a short category-appropriate wish clearly in the center-left; reserve a small uncluttered area at top-left for the real clinic/business logo and name.",
+        "Keep the bottom 22% as a simple, empty, full-width dark maroon or deep-navy contact band; do not put artwork, portrait, greeting, text, or decorative objects in this reserved band. The exact address, mobile number, and call-to-action will be added there separately.",
+        "Do not draw a top header bar. Keep all festival artwork, portrait, and greeting above the reserved contact band, without overlapping one another.",
+        ...(title === "doctor or healthcare professional"
+          ? ["Use a short warm festival wish connected to wellbeing; do not invent medical advice, treatment claims, or guaranteed health outcomes."]
+          : []),
+      ]
+      : [
+        "Keep a polished, trustworthy professional advertising composition and leave a clear, uncluttered area for the real business logo and name at top-left and a dedicated contact band at the bottom.",
+      ]),
   ];
 }
 

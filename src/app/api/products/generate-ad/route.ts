@@ -22,13 +22,11 @@ import {
   subscriptionDeniedResponse,
 } from '@/lib/subscriptionAccess';
 import {
-  addFestivalGreetingOverlay,
   detectFestival,
   getFestivalBannerInstructions,
 } from '@/lib/festivalBanner';
 import {
   addBusinessIdentityOverlay,
-  getBusinessBrandingHeaderHeight,
   getPoliticalBannerInstructions,
   getProfessionalBannerInstructions,
   isPoliticalCategory,
@@ -133,7 +131,7 @@ function buildAdPrompt(opts: {
   }
   if (hasLogo) overlayLines.push('- Place the supplied logo image in a corner as a small, tasteful watermark. Do not distort or recolor the logo.');
   const profileInstructions = professionalPhoto
-    ? getProfessionalBannerInstructions(businessType)
+    ? getProfessionalBannerInstructions(businessType, !!festivalName)
     : [];
   const politicalInstructions = professionalPhoto && isPoliticalCategory(businessType)
     ? getPoliticalBannerInstructions(conceptPrompt)
@@ -153,7 +151,7 @@ PRESERVATION — VERY IMPORTANT:
 
 ${conceptPrompt}
 ${getBannerLanguageInstructions(bannerLanguage).join('\n')}
-Leave a clean dark header band at the very top for a separately composited real business logo and business name. Do not place text or decorative numbers in this header band.
+Show the exact business or clinic name clearly within the main banner design, not inside a separate top header. Preserve the supplied logo as-is; do not redraw, distort, or replace it.
 ${profileInstructions.join('\n')}
 ${politicalInstructions.join('\n')}
 ${festivalInstructions.join('\n')}
@@ -410,8 +408,9 @@ export async function POST(req: NextRequest) {
     ].filter((part): part is string => typeof part === 'string' && !!part.trim()).join(', ');
     const festival = detectFestival(new Date().toISOString().slice(0, 10), `${conceptTitle}\n${conceptPrompt}`);
 
-    const aspectRatio =
-      (platform && PLATFORM_ASPECT_RATIO[platform] && conceptAspectRatio !== '9:16')
+    const aspectRatio = professionalCategory && festival
+      ? '16:9'
+      : (platform && PLATFORM_ASPECT_RATIO[platform] && conceptAspectRatio !== '9:16')
         ? PLATFORM_ASPECT_RATIO[platform]
         : conceptAspectRatio;
 
@@ -512,17 +511,11 @@ export async function POST(req: NextRequest) {
       category: `${business?.industryName || ''} ${categoryName || ''}`,
       mobile: businessPhone,
       address: businessAddress,
+      bannerLanguage: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
       professional: !!professionalPhoto,
+      festival: !!festival,
       logo: businessLogo,
     });
-    if (festival) {
-      generatedImage = await addFestivalGreetingOverlay(
-        generatedImage,
-        festival,
-        normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
-        await getBusinessBrandingHeaderHeight(generatedImage),
-      );
-    }
     await fs.writeFile(adFilePath, generatedImage);
 
     const imageUrl = getUploadPublicPath('products', 'ads', adFileName);
