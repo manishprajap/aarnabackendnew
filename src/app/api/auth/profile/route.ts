@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { and, eq, ne, or } from 'drizzle-orm';
+import { and, eq, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { db } from '@/db';
-import { users } from '@/db/schema';
+import { users, industries, businessCategories } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
 
@@ -113,7 +113,12 @@ export async function PUT(request: NextRequest) {
         mobile: users.mobile,
         email: users.email,
         business_category: users.business_category,
+        category: sql<string | null>`COALESCE(${businessCategories.name}, ${users.business_category})`,
+        businessCategoryName: businessCategories.name,
         businessCategoryId: users.businessCategoryId,
+        industry: industries.name,
+        industryName: industries.name,
+        industryId: users.industryId,
         city: users.city,
         website: users.website,
         logo: users.logo,
@@ -122,6 +127,8 @@ export async function PUT(request: NextRequest) {
         credits: users.credits,
       })
       .from(users)
+      .leftJoin(businessCategories, eq(users.businessCategoryId, businessCategories.id))
+      .leftJoin(industries, eq(users.industryId, industries.id))
       .where(eq(users.id, userId))
       .limit(1);
 

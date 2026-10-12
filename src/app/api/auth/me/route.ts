@@ -1,8 +1,8 @@
 // src/app/api/auth/me/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { eq, and, desc, gte } from 'drizzle-orm';
+import { eq, and, desc, gte, sql } from 'drizzle-orm';
 import { db } from '@/db';
-import { users, subscriptions, plans } from '@/db/schema';
+import { users, subscriptions, plans, industries, businessCategories } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
 import { getSubscriptionAccess } from '@/lib/subscriptionAccess';
 
@@ -52,14 +52,20 @@ export async function GET(req: NextRequest) {
         plan: users.plan,
         credits: users.credits,
         businessName: users.businessName,
-        category: users.business_category,
+        category: sql<string | null>`COALESCE(${businessCategories.name}, ${users.business_category})`,
+        businessCategoryName: businessCategories.name,
         businessCategoryId: users.businessCategoryId,
+        industry: industries.name,
+        industryName: industries.name,
+        industryId: users.industryId,
         city: users.city,
         website: users.website,
         language: users.language,
         logo: users.logo,
       })
       .from(users)
+      .leftJoin(businessCategories, eq(users.businessCategoryId, businessCategories.id))
+      .leftJoin(industries, eq(users.industryId, industries.id))
       .where(eq(users.id, payload.userId))
       .limit(1);
 

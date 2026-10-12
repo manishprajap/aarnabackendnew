@@ -261,6 +261,7 @@ export async function POST(req: NextRequest) {
           logo = COALESCE(${logoFilename}, logo),
           industry_id = ${sel.industry.id},
           business_category_id = ${sel.category.id},
+          business_category = ${sel.category.name},
           country = ${country}, state = ${state || null}, city = ${city || null},
           marketing_goal = ${marketingGoal},
           automation_mode = ${automationMode},
