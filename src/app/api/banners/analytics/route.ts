@@ -28,6 +28,7 @@ import { eq, and, inArray, count, sum, sql } from 'drizzle-orm';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { decryptFacebookToken, encryptFacebookToken } from '@/lib/facebook-token';
 import { fetchFacebookPostMetrics } from '@/lib/facebook-insights';
+import { migrateLegacyGeneratedAdImage } from '@/lib/uploadStorage';
 
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
 const IG_GRAPH_API_BASE = `https://graph.instagram.com/${META_GRAPH_VERSION}`;
@@ -657,7 +658,7 @@ export async function GET(req: NextRequest) {
         day: b?.day ?? null,
         theme: b?.theme ?? null,
         caption: b?.caption ?? null,
-        imageUrl: toFullMediaUrl(b?.imageUrl ?? null),
+        imageUrl: toFullMediaUrl(await migrateLegacyGeneratedAdImage(b?.imageUrl ?? null)),
         publishedAt: publicationRows
           .filter((row) => row.bannerId === id)
           .reduce<Date | null>(

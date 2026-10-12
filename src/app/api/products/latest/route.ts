@@ -6,6 +6,7 @@ import { products, banners } from '@/db/schema';
 import { asc, desc, eq } from 'drizzle-orm';
 
 import { getUserIdFromRequest } from '@/lib/auth';
+import { migrateLegacyGeneratedAdImage } from '@/lib/uploadStorage';
 
 /*
 |--------------------------------------------------------------------------
@@ -139,7 +140,7 @@ export async function GET(req: NextRequest) {
 
         status: product.status,
 
-        originalImageUrl: toFullUrl(product.originalImageUrl),
+        originalImageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(product.originalImageUrl)),
 
         cleanImageUrl: toFullUrl(product.cleanImageUrl),
 
@@ -173,14 +174,14 @@ export async function GET(req: NextRequest) {
 
         createdAt: product.createdAt,
 
-        banners: productBanners.map((banner) => ({
+        banners: await Promise.all(productBanners.map(async (banner) => ({
           id: banner.id,
           day: banner.day,
           theme: banner.theme,
-          imageUrl: toFullUrl(banner.imageUrl),
+          imageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(banner.imageUrl)),
           caption: banner.caption,
           createdAt: banner.createdAt,
-        })),
+        }))),
       },
     });
   } catch (error) {
@@ -195,4 +196,3 @@ export async function GET(req: NextRequest) {
     );
   }
 }
-

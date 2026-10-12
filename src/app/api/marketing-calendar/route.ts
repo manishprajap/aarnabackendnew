@@ -12,6 +12,7 @@ import { reserveBannerGeneration, subscriptionDeniedResponse } from "@/lib/subsc
 import {
   getUploadPublicPath,
   getUploadStoragePath,
+  migrateLegacyGeneratedAdImage,
   UPLOAD_BASE_DIR,
 } from "@/lib/uploadStorage";
 
@@ -168,7 +169,7 @@ export async function GET(request: NextRequest) {
         banner: row.banner_id
           ? {
               id: Number(row.banner_id),
-              imageUrl: toFullUrl(row.banner_image_url),
+              imageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(row.banner_image_url)),
               caption: row.banner_caption,
               posted: row.banner_posted === true || Number(row.banner_posted) === 1,
             }
@@ -186,7 +187,7 @@ export async function GET(request: NextRequest) {
         .filter(Boolean);
       const publishedBanner = {
         id: Number(row.banner_id),
-        imageUrl: toFullUrl(row.banner_image_url),
+        imageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(row.banner_image_url)),
         caption: row.banner_caption,
         theme: row.banner_theme ?? null,
         platforms,
@@ -198,7 +199,7 @@ export async function GET(request: NextRequest) {
         if (!existing.banner?.posted || !existing.banner.platforms?.length) {
           existing.banner = {
             id: Number(row.banner_id),
-            imageUrl: toFullUrl(row.banner_image_url),
+            imageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(row.banner_image_url)),
             caption: row.banner_caption,
             posted: true,
             platforms,

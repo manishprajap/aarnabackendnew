@@ -5,6 +5,7 @@ import { products, banners } from '@/db/schema';
 import { createId } from '@paralleldrive/cuid2';
 
 import fs from 'fs/promises';
+import path from 'path';
 import { corsHeaders } from '@/lib/cors';
 import {
   getUploadPublicPath,

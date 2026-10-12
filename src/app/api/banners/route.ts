@@ -4,6 +4,7 @@ import { db } from '@/db';
 import { products, banners } from '@/db/schema';
 import { eq, desc, inArray, and } from 'drizzle-orm';
 import { verifyToken } from '@/lib/auth';
+import { migrateLegacyGeneratedAdImage } from '@/lib/uploadStorage';
 
 export const runtime = 'nodejs';
 
@@ -85,7 +86,7 @@ export async function GET(req: NextRequest) {
       )
       .orderBy(desc(banners.createdAt));
 
-    const result = rows.map((banner) => {
+    const result = await Promise.all(rows.map(async (banner) => {
       const product = productById.get(banner.productId);
 
       return {
@@ -105,11 +106,11 @@ export async function GET(req: NextRequest) {
 
         day: banner.day,
         theme: banner.theme,
-        imageUrl: toFullUrl(banner.imageUrl),
+        imageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(banner.imageUrl)),
         caption: banner.caption,
         createdAt: banner.createdAt,
       };
-    });
+    }));
 
     return NextResponse.json({ success: true, banners: result });
   } catch (error) {

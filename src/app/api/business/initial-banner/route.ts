@@ -11,6 +11,7 @@ import { insertIdOf, rowsOf } from "@/lib/onboarding";
 import {
   getUploadPublicPath,
   getUploadStoragePath,
+  migrateLegacyGeneratedAdImage,
   UPLOAD_BASE_DIR,
 } from "@/lib/uploadStorage";
 
@@ -150,7 +151,7 @@ export async function POST(request: NextRequest) {
         success: true,
         alreadyGenerated: true,
         bannerId: Number(claim.banner?.id),
-        imageUrl: claim.banner?.image_url,
+        imageUrl: await migrateLegacyGeneratedAdImage(claim.banner?.image_url),
       });
     }
     if (claim.busy) {
