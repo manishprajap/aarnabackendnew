@@ -45,15 +45,17 @@ const festivalColumns = {
   description: festivals.description,
 };
 
-export async function getUpcomingFestivals(daysAhead = 2): Promise<Festival[]> {
+export async function getUpcomingFestivals(daysAhead = 2, daysBefore = 2): Promise<Festival[]> {
   const today = getIndiaDate();
+  const startDate = addDays(today, -Math.max(0, Math.min(daysBefore, 30)));
+  const endDate = addDays(today, Math.max(0, Math.min(daysAhead, 30)));
   return db
     .select(festivalColumns)
     .from(festivals)
     .where(and(
       eq(festivals.isActive, true),
-      gte(festivals.festivalDate, today),
-      lte(festivals.festivalDate, addDays(today, Math.max(0, Math.min(daysAhead, 7)))),
+      gte(festivals.festivalDate, startDate),
+      lte(festivals.festivalDate, endDate),
     ))
     .orderBy(asc(festivals.festivalDate), asc(festivals.name));
 }
@@ -77,14 +79,16 @@ export async function getSelectedUpcomingFestivals(ids: unknown): Promise<Festiv
   }
   const uniqueIds = [...new Set(parsedIds)];
   const today = getIndiaDate();
+  const startDate = addDays(today, -2);
+  const endDate = addDays(today, 2);
   const selected = await db
     .select(festivalColumns)
     .from(festivals)
     .where(and(
       eq(festivals.isActive, true),
       inArray(festivals.id, uniqueIds),
-      gte(festivals.festivalDate, today),
-      lte(festivals.festivalDate, addDays(today, 2)),
+      gte(festivals.festivalDate, startDate),
+      lte(festivals.festivalDate, endDate),
     ))
     .orderBy(asc(festivals.festivalDate), asc(festivals.name));
   if (selected.length !== uniqueIds.length) {
