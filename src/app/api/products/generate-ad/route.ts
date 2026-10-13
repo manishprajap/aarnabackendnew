@@ -22,8 +22,9 @@ import {
   subscriptionDeniedResponse,
 } from '@/lib/subscriptionAccess';
 import {
-  detectFestival,
   getFestivalBannerInstructions,
+  getSelectedUpcomingFestivals,
+  type Festival,
 } from '@/lib/festivalBanner';
 import {
   addBusinessIdentityOverlay,
@@ -109,10 +110,10 @@ function buildAdPrompt(opts: {
   categoryName: string | null;
   businessType: string;
   professionalPhoto: boolean;
-  festivalName: string | null;
+  festivals: Festival[];
   bannerLanguage: 'Hindi' | 'English';
 }) {
-  const { product, conceptPrompt, aspectRatio, overlay, hasLogo, categoryName, businessType, professionalPhoto, festivalName, bannerLanguage } = opts;
+  const { product, conceptPrompt, aspectRatio, overlay, hasLogo, categoryName, businessType, professionalPhoto, festivals, bannerLanguage } = opts;
 
   const name = product.title || 'this product';
   const brand = product.brand ? ` by ${product.brand}` : '';
@@ -130,14 +131,14 @@ function buildAdPrompt(opts: {
     overlayLines.push(`- Show this exact business address clearly: "${overlay.address}".`);
   }
   if (hasLogo) overlayLines.push('- Place the supplied logo image in a corner as a small, tasteful watermark. Do not distort or recolor the logo.');
-  const festival = festivalName ? detectFestival(new Date().toISOString().slice(0, 10), festivalName) : null;
+  const hasFestival = festivals.length > 0;
   const profileInstructions = professionalPhoto
-    ? getProfessionalBannerInstructions(businessType, !!festival, hasLogo)
+    ? getProfessionalBannerInstructions(businessType, hasFestival, hasLogo)
     : [];
   const politicalInstructions = professionalPhoto && isPoliticalCategory(businessType)
     ? getPoliticalBannerInstructions(conceptPrompt)
     : [];
-  const festivalInstructions = festival ? getFestivalBannerInstructions(festival, bannerLanguage) : [];
+  const festivalInstructions = getFestivalBannerInstructions(festivals, bannerLanguage);
 
   return `
 Create a professional advertising banner using the supplied reference image(s).
@@ -221,11 +222,35 @@ export async function POST(req: NextRequest) {
 
     const logoFile = formData.get('logo') as File | null;
     const requestedBannerLanguage = formData.get('bannerLanguage');
+    const festivalIdsRaw = formData.get('festivalIds');
 
     if (!productIdRaw || (!suggestionIdRaw && !presetKey)) {
       return NextResponse.json(
         { success: false, message: 'productId and either suggestionId or presetKey are required' },
         { status: 400 }
+      );
+    }
+
+    let festivalIds: unknown[] = [];
+    if (typeof festivalIdsRaw === 'string' && festivalIdsRaw.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(festivalIdsRaw);
+        if (!Array.isArray(parsed)) throw new Error('Festival IDs must be an array.');
+        festivalIds = parsed;
+      } catch (error) {
+        return NextResponse.json(
+          { success: false, message: error instanceof Error ? error.message : 'Invalid festival selection.' },
+          { status: 400 }
+        );
+      }
+    }
+    let selectedFestivals: Festival[];
+    try {
+      selectedFestivals = await getSelectedUpcomingFestivals(festivalIds);
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, message: error instanceof Error ? error.message : 'Invalid occasion selection.' },
+        { status: 422 }
       );
     }
 
@@ -406,9 +431,8 @@ export async function POST(req: NextRequest) {
       business?.state,
       business?.country,
     ].filter((part): part is string => typeof part === 'string' && !!part.trim()).join(', ');
-    const festival = detectFestival(new Date().toISOString().slice(0, 10), `${conceptTitle}\n${conceptPrompt}`);
-
-    const aspectRatio = professionalCategory && festival
+    const hasFestival = selectedFestivals.length > 0;
+    const aspectRatio = professionalCategory && hasFestival
       ? '16:9'
       : (platform && PLATFORM_ASPECT_RATIO[platform] && conceptAspectRatio !== '9:16')
         ? PLATFORM_ASPECT_RATIO[platform]
@@ -456,7 +480,7 @@ export async function POST(req: NextRequest) {
       categoryName,
       businessType: `${business?.industryName || ''} ${categoryName || ''}`,
       professionalPhoto: !!professionalPhoto,
-      festivalName: festival?.name || null,
+      festivals: selectedFestivals,
       bannerLanguage: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
     });
 
@@ -518,7 +542,7 @@ export async function POST(req: NextRequest) {
       address: businessAddress,
       bannerLanguage: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
       professional: !!professionalPhoto,
-      festival: !!festival,
+      festival: hasFestival,
       logo: businessLogo,
     });
     await fs.writeFile(adFilePath, generatedImage);

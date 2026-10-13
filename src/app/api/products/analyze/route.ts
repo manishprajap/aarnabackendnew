@@ -13,8 +13,11 @@ import { corsHeaders } from '@/lib/cors';
 import { AuthError, getUserIdFromRequest } from '@/lib/auth';
 import { getSubscriptionAccess, subscriptionDeniedResponse } from '@/lib/subscriptionAccess';
 import {
-  detectFestival,
+  getFestivalCaption,
+  getFestivalTheme,
   getFestivalBannerInstructions,
+  getSelectedUpcomingFestivals,
+  type Festival,
 } from '@/lib/festivalBanner';
 import {
   addBusinessIdentityOverlay,
@@ -70,7 +73,7 @@ interface BannerOptions {
   professionalPhoto: { buffer: Buffer; mimeType: string } | null;
   mobile: string;
   address: string;
-  scheduledDate: string | null;
+  festivals: Festival[];
   bannerLanguage: 'Hindi' | 'English';
 }
 
@@ -222,14 +225,14 @@ function buildCreativePrompt(aiData: any, options: BannerOptions): string {
       : '';
 
   const categoryLine = options.categoryName ? `Business category: ${options.categoryName}.` : '';
-  const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
+  const hasFestival = options.festivals.length > 0;
   const professionalLines = options.professionalPhoto
-    ? getProfessionalBannerInstructions(options.businessType, !!festival, !!options.logo)
+    ? getProfessionalBannerInstructions(options.businessType, hasFestival, !!options.logo)
     : [];
   const politicalLines = options.professionalPhoto && isPoliticalCategory(options.businessType)
     ? getPoliticalBannerInstructions(options.userPrompt || '')
     : [];
-  const festivalLines = festival ? getFestivalBannerInstructions(festival, options.bannerLanguage) : [];
+  const festivalLines = getFestivalBannerInstructions(options.festivals, options.bannerLanguage);
 
   const brandColorLine = options.bannerColor
     ? `Use ${options.bannerColor} as the dominant accent/background color for text, badges, or backdrop elements — keep it tasteful and premium, not overpowering the product.`
@@ -321,8 +324,8 @@ async function generateCreativeBanner(
       throw new Error('Base64 product image is empty');
     }
 
-    const festival = detectFestival(options.scheduledDate, `${options.userPrompt || ''} ${options.promptType || ''}`);
-    const aspectRatio = options.professionalPhoto && festival ? '16:9' : options.aspectRatio;
+    const hasFestival = options.festivals.length > 0;
+    const aspectRatio = options.professionalPhoto && hasFestival ? '16:9' : options.aspectRatio;
     const creativePrompt = buildCreativePrompt(aiData, { ...options, aspectRatio });
 
     console.log('Calling Gemini image generation...');
@@ -440,7 +443,7 @@ async function generateCreativeBanner(
       address: options.address,
       bannerLanguage: options.bannerLanguage,
       professional: !!options.professionalPhoto,
-      festival: !!festival,
+      festival: hasFestival,
       logo: options.logo,
     });
 
@@ -483,14 +486,15 @@ async function generateCreativeBanner(
     // root + this path, NOT the /bizmyntra app path).
     const imageUrl = getUploadPublicPath('products', 'banners', bannerFileName);
 
+    const festivalTheme = getFestivalTheme(options.festivals);
+    const festivalCaption = getFestivalCaption(options.festivals, options.bannerLanguage);
+    const caption = [festivalCaption, headline].filter(Boolean).join('\n');
     const insertResult = await db.insert(banners).values({
       productId,
       day: 1,
-      theme: festival?.name || themeLabel,
+      theme: festivalTheme || themeLabel,
       imageUrl,
-      caption: festival
-        ? `${festival.greeting} · ${festival.hindiGreeting}\n${headline}`
-        : headline,
+      caption,
     });
 
     const bannerId = (insertResult as any)[0]?.insertId as number;
@@ -498,11 +502,9 @@ async function generateCreativeBanner(
     return {
       id: bannerId,
       day: 1,
-      theme: festival?.name || themeLabel,
+      theme: festivalTheme || themeLabel,
       imageUrl,
-      caption: festival
-        ? `${festival.greeting} · ${festival.hindiGreeting}\n${headline}`
-        : headline,
+      caption,
       status: 'done' as const,
       error: null,
     };
@@ -587,6 +589,15 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
+    let selectedFestivals: Festival[];
+    try {
+      selectedFestivals = await getSelectedUpcomingFestivals(body?.festivalIds ?? []);
+    } catch (error) {
+      return json(
+        { success: false, message: error instanceof Error ? error.message : 'Invalid occasion selection.' },
+        { status: 422 }
+      );
+    }
 
     const rawProductId = body?.productId;
 
@@ -1033,7 +1044,7 @@ Use exactly this structure:
         professionalPhoto,
         mobile: String(businessDetails?.mobile || ''),
         address: businessAddress.join(', '),
-        scheduledDate: new Date().toISOString().slice(0, 10),
+        festivals: selectedFestivals,
         bannerLanguage: normalizeBannerLanguage(body?.bannerLanguage ?? businessDetails?.bannerLanguage),
       }
     );

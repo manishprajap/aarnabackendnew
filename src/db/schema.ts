@@ -1265,6 +1265,56 @@ export const customerMarketingDaysRelations = relations(customerMarketingDays, (
 }));
 
 /* =========================================================
+   FESTIVALS (festival calendar: 2026-10-11 through 2027-12-31)
+   Matches the `festivals` seed SQL. Lunar/religious dates can vary
+   by region; verify locally before scheduled campaigns.
+========================================================= */
+
+export const festivals = mysqlTable(
+  'festivals',
+  {
+    id: int('id').autoincrement().primaryKey(),
+    slug: varchar('slug', { length: 191 }).notNull(),
+    name: varchar('name', { length: 191 }).notNull(),
+    nameHi: varchar('name_hi', { length: 191 }),
+    festivalDate: date('festival_date', { mode: 'string' }).notNull(),
+    festivalType: mysqlEnum('festival_type', [
+      'FESTIVAL',
+      'JAYANTI',
+      'NATIONAL_DAY',
+      'RELIGIOUS',
+      'OBSERVANCE',
+    ])
+      .notNull()
+      .default('FESTIVAL'),
+    religion: mysqlEnum('religion', [
+      'HINDU',
+      'SIKH',
+      'CHRISTIAN',
+      'JAIN',
+      'BUDDHIST',
+      'PARSI',
+      'OTHER',
+      'NONE',
+    ])
+      .notNull()
+      .default('OTHER'),
+    description: text('description'),
+    region: varchar('region', { length: 191 }).notNull().default('India'),
+    isPublicHoliday: boolean('is_public_holiday').notNull().default(false),
+    isActive: boolean('is_active').notNull().default(true),
+    sourceNote: varchar('source_note', { length: 500 }),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
+  },
+  (table) => ({
+    slugDateUnique: uniqueIndex('festivals_slug_date_uq').on(table.slug, table.festivalDate),
+    dateIdx: index('festivals_date_idx').on(table.festivalDate),
+    typeIdx: index('festivals_type_idx').on(table.festivalType),
+  })
+);
+
+/* =========================================================
    USERS RELATIONS (defined last so every table exists)
 ========================================================= */
 

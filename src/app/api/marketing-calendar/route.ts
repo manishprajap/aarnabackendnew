@@ -22,8 +22,10 @@ import {
 } from "@/lib/businessBanner";
 import { getBannerLanguageInstructions, normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
-  detectFestival,
+  getFestivalCaption,
+  getFestivalTheme,
   getFestivalBannerInstructions,
+  getFestivalsForDate,
 } from "@/lib/festivalBanner";
 import { reserveBannerGeneration, subscriptionDeniedResponse } from "@/lib/subscriptionAccess";
 import {
@@ -318,14 +320,10 @@ export async function POST(request: NextRequest) {
     const bannerLanguage = normalizeBannerLanguage(profile.banner_language);
     const professionalCategory = isProfessionalPortraitCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
     const politicalCategory = isPoliticalCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
-    const topic = [
-      profile.topic_title,
-      profile.prompt,
-      profile.caption,
-      profile.hashtags,
-      profile.image_prompt,
-    ].map((value) => stringValue(value, 8000)).join("\n");
-    const festival = detectFestival(profile.scheduled_date, topic);
+    const selectedFestivals = await getFestivalsForDate(
+      typeof profile.scheduled_date === "string" ? profile.scheduled_date.slice(0, 10) : "",
+    );
+    const hasFestival = selectedFestivals.length > 0;
     let professionalPhoto: { buffer: Buffer; mimeType: string } | null = null;
     if (professionalCategory) {
       professionalPhoto = portrait
@@ -439,11 +437,11 @@ export async function POST(request: NextRequest) {
       `Campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
-      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, !!festival, !!logo) : []),
+      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, hasFestival, !!logo) : []),
       ...getBannerLanguageInstructions(bannerLanguage),
-      ...(festival ? getFestivalBannerInstructions(festival, bannerLanguage) : []),
+      ...getFestivalBannerInstructions(selectedFestivals, bannerLanguage),
       ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
-      `Use a ${professionalCategory && festival ? "wide landscape 16:9" : "square 1:1"} social-media layout with readable typography and clear visual hierarchy.`,
+      `Use a ${professionalCategory && hasFestival ? "wide landscape 16:9" : "square 1:1"} social-media layout with readable typography and clear visual hierarchy.`,
       "Show the exact business or clinic name clearly. Preserve the supplied logo as-is; do not redraw, distort, or replace it.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",
     ].filter(Boolean).join("\n");
@@ -458,7 +456,7 @@ export async function POST(request: NextRequest) {
       contents: [{ role: "user", parts }],
       config: {
         responseModalities: ["TEXT", "IMAGE"],
-        imageConfig: { aspectRatio: professionalCategory && festival ? "16:9" : "1:1", imageSize: "1K" },
+        imageConfig: { aspectRatio: professionalCategory && hasFestival ? "16:9" : "1:1", imageSize: "1K" },
       },
     });
     const imagePart = generated.candidates?.[0]?.content?.parts?.find((part) => part.inlineData?.data);
@@ -481,7 +479,7 @@ export async function POST(request: NextRequest) {
       address,
       bannerLanguage,
       professional: professionalCategory,
-      festival: !!festival,
+      festival: hasFestival,
       logo,
     });
     const mimeType = imagePart.inlineData.mimeType || "image/png";
@@ -492,7 +490,7 @@ export async function POST(request: NextRequest) {
     await writeFile(path.join(OUTPUT_DIR, fileName), imageBuffer, { flag: "wx" });
 
     const caption = [
-      festival ? `${festival.greeting} · ${festival.hindiGreeting}` : "",
+      getFestivalCaption(selectedFestivals, bannerLanguage),
       stringValue(profile.caption, 4000),
       stringValue(profile.hashtags, 1000),
     ].filter(Boolean).join("\n\n");
@@ -507,14 +505,14 @@ export async function POST(request: NextRequest) {
       if (bannerId) {
         await tx.execute(sql`
           UPDATE banners
-          SET theme = ${festival?.name || stringValue(profile.topic_title, 100) || strategyName},
+          SET theme = ${getFestivalTheme(selectedFestivals) || stringValue(profile.topic_title, 100) || strategyName},
               image_url = ${imageUrl}, caption = ${caption || null}
           WHERE id = ${bannerId} AND product_id = ${productId} AND COALESCE(posted, 0) = 0
         `);
       } else {
         const result = await tx.execute(sql`
           INSERT INTO banners (product_id, day, theme, image_url, caption, posted)
-          VALUES (${productId}, ${day}, ${festival?.name || stringValue(profile.topic_title, 100) || strategyName}, ${imageUrl}, ${caption || null}, false)
+          VALUES (${productId}, ${day}, ${getFestivalTheme(selectedFestivals) || stringValue(profile.topic_title, 100) || strategyName}, ${imageUrl}, ${caption || null}, false)
         `);
         bannerId = insertIdOf(result);
         if (!bannerId) throw new Error("Could not save the generated calendar banner.");

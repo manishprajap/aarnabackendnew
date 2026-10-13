@@ -1,114 +1,135 @@
+import { and, asc, eq, gte, inArray, lte } from "drizzle-orm";
+import { db } from "@/db";
+import { festivals } from "@/db/schema";
 import type { BannerLanguage } from "@/lib/bannerLanguage";
 
 export type Festival = {
+  id: number;
+  slug: string;
   name: string;
-  greeting: string;
-  hindiGreeting: string;
-  visualDirection: string;
-  startsOn: string;
-  endsOn: string;
-  aliases: RegExp;
+  nameHi: string | null;
+  festivalDate: string;
+  festivalType: string;
+  religion: string;
+  description: string | null;
 };
 
-const FESTIVALS_2026: Festival[] = [
-  {
-    name: "Sharad Navratri",
-    greeting: "Happy Navratri",
-    hindiGreeting: "नवरात्रि की हार्दिक शुभकामनाएँ",
-    visualDirection: "garba dandiya lights, marigold flowers, traditional toran and auspicious red-gold festive details",
-    startsOn: "2026-10-11",
-    endsOn: "2026-10-16",
-    aliases: /\b(?:sharad\s+)?navratri\b|नवरात्रि|नवरात्री/i,
-  },
-  {
-    name: "Durga Puja",
-    greeting: "Happy Durga Puja",
-    hindiGreeting: "दुर्गा पूजा की हार्दिक शुभकामनाएँ",
-    visualDirection: "elegant Durga Puja alpana, dhak-inspired festive details, red-white flowers and warm pandal lights",
-    startsOn: "2026-10-17",
-    endsOn: "2026-10-19",
-    aliases: /\bdurga\s+puja\b|दुर्गा पूजा/i,
-  },
-  {
-    name: "Dussehra",
-    greeting: "Happy Dussehra",
-    hindiGreeting: "दशहरा की हार्दिक शुभकामनाएँ",
-    visualDirection: "tasteful Dussehra celebration with marigold decorations and a warm golden festive glow",
-    startsOn: "2026-10-20",
-    endsOn: "2026-10-20",
-    aliases: /\b(?:dussehra|vijaya\s+dashami|vijayadashami)\b|दशहरा|विजयादशमी/i,
-  },
-  {
-    name: "Diwali",
-    greeting: "Happy Diwali",
-    hindiGreeting: "दीपावली की हार्दिक शुभकामनाएँ",
-    visualDirection: "glowing diyas, tasteful rangoli, marigold garlands and elegant warm gold festive lights",
-    startsOn: "2026-11-08",
-    endsOn: "2026-11-08",
-    aliases: /\b(?:diwali|deepavali)\b|दिवाली|दीपावली/i,
-  },
-  {
-    name: "Govardhan Puja",
-    greeting: "Happy Govardhan Puja",
-    hindiGreeting: "गोवर्धन पूजा की हार्दिक शुभकामनाएँ",
-    visualDirection: "respectful Govardhan Puja motifs, a small symbolic Govardhan hill, flowers and devotional festive colors",
-    startsOn: "2026-11-09",
-    endsOn: "2026-11-09",
-    aliases: /\bgovardhan(?:\s+puja)?\b|गोवर्धन पूजा/i,
-  },
-  {
-    name: "Bhai Dooj",
-    greeting: "Happy Bhai Dooj",
-    hindiGreeting: "भाई दूज की हार्दिक शुभकामनाएँ",
-    visualDirection: "warm Bhai Dooj family-festival details with a subtle tilak thali, flowers and diyas",
-    startsOn: "2026-11-10",
-    endsOn: "2026-11-10",
-    aliases: /\bbhai\s*dooj\b|\bbhaiya\s*dooj\b|भाई दूज|भैया दूज/i,
-  },
-  {
-    name: "Eid al-Fitr",
-    greeting: "Eid Mubarak",
-    hindiGreeting: "ईद मुबारक",
-    visualDirection: "elegant crescent moon, soft lantern light, geometric Islamic art and tasteful festive greenery",
-    startsOn: "2026-03-20",
-    endsOn: "2026-03-21",
-    aliases: /\b(?:eid(?:\s+al)?\s*[- ]?fitr|eid ul fitr|ramzan eid)\b|ईद(?:\s*उल\s*फितर)?/i,
-  },
-  {
-    name: "Eid al-Adha",
-    greeting: "Eid Mubarak",
-    hindiGreeting: "ईद-उल-अज़हा मुबारक",
-    visualDirection: "elegant crescent moon, refined lantern light, geometric Islamic art and a dignified Eid gathering atmosphere",
-    startsOn: "2026-05-27",
-    endsOn: "2026-05-28",
-    aliases: /\b(?:eid(?:\s+al)?\s*[- ]?adha|eid ul adha|bakrid|bakra eid)\b|ईद(?:\s*उल\s*अज़हा)?|बकरीद/i,
-  },
-];
+const INDIA_TIME_ZONE = "Asia/Kolkata";
 
-export function detectFestival(dateValue: unknown, text = ""): Festival | null {
-  const date = dateValue instanceof Date
-    ? dateValue.toISOString().slice(0, 10)
-    : typeof dateValue === "string" && /^\d{4}-\d{2}-\d{2}/.test(dateValue)
-      ? dateValue.slice(0, 10)
-      : "";
-  const normalizedText = String(text || "");
-  const explicitlyMentioned = FESTIVALS_2026.find((festival) => festival.aliases.test(normalizedText));
-  const dateMatch = FESTIVALS_2026.find((festival) => date >= festival.startsOn && date <= festival.endsOn);
-  if (explicitlyMentioned && dateMatch?.name === explicitlyMentioned.name) return dateMatch;
-  if (explicitlyMentioned) return explicitlyMentioned;
+export function getIndiaDate(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: INDIA_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
 
-  return dateMatch ?? null;
+function addDays(date: string, days: number): string {
+  const value = new Date(`${date}T12:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+const festivalColumns = {
+  id: festivals.id,
+  slug: festivals.slug,
+  name: festivals.name,
+  nameHi: festivals.nameHi,
+  festivalDate: festivals.festivalDate,
+  festivalType: festivals.festivalType,
+  religion: festivals.religion,
+  description: festivals.description,
+};
+
+export async function getUpcomingFestivals(daysAhead = 2): Promise<Festival[]> {
+  const today = getIndiaDate();
+  return db
+    .select(festivalColumns)
+    .from(festivals)
+    .where(and(
+      eq(festivals.isActive, true),
+      gte(festivals.festivalDate, today),
+      lte(festivals.festivalDate, addDays(today, Math.max(0, Math.min(daysAhead, 7)))),
+    ))
+    .orderBy(asc(festivals.festivalDate), asc(festivals.name));
+}
+
+export async function getFestivalsForDate(date: unknown): Promise<Festival[]> {
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+  return db
+    .select(festivalColumns)
+    .from(festivals)
+    .where(and(eq(festivals.isActive, true), eq(festivals.festivalDate, date)))
+    .orderBy(asc(festivals.name));
+}
+
+export async function getSelectedUpcomingFestivals(ids: unknown): Promise<Festival[]> {
+  if (ids === undefined || ids === null) return [];
+  if (!Array.isArray(ids)) throw new Error("Festival selections must be an array of IDs.");
+  if (ids.length === 0) return [];
+  const parsedIds = ids.map(Number);
+  if (parsedIds.some((id) => !Number.isInteger(id) || id <= 0)) {
+    throw new Error("Festival selections must contain valid IDs.");
+  }
+  const uniqueIds = [...new Set(parsedIds)];
+  const today = getIndiaDate();
+  const selected = await db
+    .select(festivalColumns)
+    .from(festivals)
+    .where(and(
+      eq(festivals.isActive, true),
+      inArray(festivals.id, uniqueIds),
+      gte(festivals.festivalDate, today),
+      lte(festivals.festivalDate, addDays(today, 2)),
+    ))
+    .orderBy(asc(festivals.festivalDate), asc(festivals.name));
+  if (selected.length !== uniqueIds.length) {
+    throw new Error("One or more selected occasions are no longer available. Refresh the list and try again.");
+  }
+  return selected;
 }
 
 export function getFestivalBannerInstructions(
-  festival: Festival,
+  selectedFestivals: Festival[],
   language: BannerLanguage = "English",
 ): string[] {
-  const greeting = language === "Hindi" ? festival.hindiGreeting : festival.greeting;
+  if (selectedFestivals.length === 0) return [];
+
+  const occasionLines = selectedFestivals.map((festival) => {
+    const title = language === "Hindi" && festival.nameHi ? festival.nameHi : festival.name;
+    const description = festival.description?.trim();
+    return `- ${title}${description ? `: ${description}` : ""}`;
+  });
+  const titles = selectedFestivals.map((festival) =>
+    language === "Hindi" && festival.nameHi ? festival.nameHi : festival.name,
+  );
+
   return [
-    `FESTIVAL: This is a ${festival.name} greeting banner. Make the festival the main occasion, using ${festival.visualDirection}.`,
-    `Include the exact prominent greeting "${greeting}". Keep it readable and spelled exactly.`,
-    "Create an attractive celebratory greeting-card composition appropriate to the business category, without turning it into an unrelated product sale.",
-    "Do not add religious claims, political endorsements, party symbols, invented offers or unrelated religious symbols.",
+    `OCCASION GREETING BANNER: Create one unified banner that respectfully includes all selected occasions: ${titles.join(", ")}.`,
+    ...occasionLines,
+    `Include one concise, legible greeting for each selected occasion in ${language}. Keep all wishes together in this same banner; do not create separate banners.`,
+    "Use visual motifs that suit the selected occasions and keep the overall composition polished, readable, and appropriate for the business.",
+    "Do not add unrelated religious symbols, political endorsements, invented offers, or unsupported claims.",
   ];
+}
+
+export function getFestivalTheme(selectedFestivals: Festival[]): string | null {
+  return selectedFestivals.length
+    ? selectedFestivals.map((festival) => festival.name).join(" + ")
+    : null;
+}
+
+export function getFestivalCaption(
+  selectedFestivals: Festival[],
+  language: BannerLanguage,
+): string {
+  return selectedFestivals
+    .map((festival) => language === "Hindi" && festival.nameHi
+      ? `${festival.nameHi} की हार्दिक शुभकामनाएँ`
+      : `Wishing you a happy ${festival.name}`)
+    .join("\n");
 }
