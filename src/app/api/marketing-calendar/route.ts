@@ -268,17 +268,20 @@ export async function POST(request: NextRequest) {
     });
     let dayValue: FormDataEntryValue | unknown;
     let portrait: File | null = null;
+    let regenerate = false;
     if (request.headers.get("content-type")?.includes("multipart/form-data")) {
       const formData = await request.formData();
       dayValue = formData.get("day");
+      regenerate = formData.get("regenerate") === "true";
       try {
         portrait = validatePoliticianPortrait(formData.get("portrait"));
       } catch (error) {
         return json({ success: false, error: error instanceof Error ? error.message : "Invalid politician portrait." }, 422);
       }
     } else {
-      const body = await request.json().catch(() => null) as { day?: unknown } | null;
+      const body = await request.json().catch(() => null) as { day?: unknown; regenerate?: unknown } | null;
       dayValue = body?.day;
+      regenerate = body?.regenerate === true;
     }
     const day = Number(dayValue);
     if (!Number.isInteger(day) || day < 1 || day > 31) {
@@ -316,6 +319,7 @@ export async function POST(request: NextRequest) {
     if (!profile) return json({ success: false, error: "No planned content was found for that date." }, 404);
 
     const businessName = stringValue(profile.business_name, 190);
+    const isPlaceholderBusinessName = /^(?:test|demo)(?:\s+(?:test|demo))*$/i.test(businessName);
     const categoryName = stringValue(profile.category_name, 100);
     const bannerLanguage = normalizeBannerLanguage(profile.banner_language);
     const professionalCategory = isProfessionalPortraitCategory(`${stringValue(profile.industry_name, 100)} ${categoryName}`);
@@ -356,12 +360,23 @@ export async function POST(request: NextRequest) {
         }
 
         const existingBanner = rowsOf(await tx.execute(sql`
-          SELECT id, posted FROM banners
+          SELECT id, posted, image_url FROM banners
           WHERE product_id = ${existingId} AND day = ${day}
           LIMIT 1
         `))[0] as Row | undefined;
         if (existingBanner && (existingBanner.posted === true || Number(existingBanner.posted) === 1)) {
           return { productId: existingId, bannerId: null, alreadyPosted: true, busy: false, previousStatus: String(existingProduct.status ?? "done") };
+        }
+        if (existingBanner?.image_url && !regenerate) {
+          return {
+            productId: existingId,
+            bannerId: Number(existingBanner.id),
+            imageUrl: String(existingBanner.image_url),
+            alreadyGenerated: true,
+            alreadyPosted: false,
+            busy: false,
+            previousStatus: String(existingProduct.status ?? "done"),
+          };
         }
 
         await tx.execute(sql`
@@ -400,6 +415,16 @@ export async function POST(request: NextRequest) {
     if (claim.alreadyPosted) {
       return json({ success: false, error: "A published banner cannot be replaced." }, 409);
     }
+    if ("alreadyGenerated" in claim && claim.alreadyGenerated) {
+      return json({
+        success: true,
+        alreadyGenerated: true,
+        banner: {
+          id: claim.bannerId,
+          imageUrl: toFullUrl(await migrateLegacyGeneratedAdImage(claim.imageUrl)),
+        },
+      });
+    }
 
     const reservation = await reserveBannerGeneration(userId, {
       productId,
@@ -428,7 +453,9 @@ export async function POST(request: NextRequest) {
 
     const prompt = [
       "Create one polished, professional social-media marketing banner for this business.",
-      `Business name (spell exactly): ${businessName}`,
+      ...(isPlaceholderBusinessName
+        ? ["The saved business name is only a test/demo placeholder; do not display it or invent a replacement brand name."]
+        : [`Business name (spell exactly): ${businessName}`]),
       `Business category: ${categoryName}`,
       `Selected promotion strategy: ${strategyName}${strategyObjective ? ` — ${strategyObjective}` : ""}`,
       `Campaign topic: ${stringValue(profile.topic_title, 255)}`,
@@ -447,7 +474,11 @@ export async function POST(request: NextRequest) {
           ? ["Political category banner: do not invent a portrait, party name, party symbol, flag, public office, promise, endorsement, slogan or contact detail."]
           : []),
       `Use a ${professionalCategory && hasFestival ? "wide landscape 16:9" : "square 1:1"} social-media layout with readable typography and clear visual hierarchy.`,
-      "Show the exact business or clinic name clearly. Preserve the supplied logo as-is; do not redraw, distort, or replace it.",
+      ...(isPlaceholderBusinessName
+        ? []
+        : ["Show the exact business or clinic name clearly."]),
+      ...(logo ? ["Preserve the supplied logo as-is; do not redraw, distort, or replace it."] : []),
+      "Use only accurate campaign text, keep it within safe margins, and never add placeholder words such as test or demo, random lettering, repeated copy, phone numbers, addresses, phone icons, contact labels, or call buttons. Contact details are added in a clean footer separately.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",
     ].filter(Boolean).join("\n");
     const parts: Part[] = [{ text: prompt }];
@@ -486,6 +517,7 @@ export async function POST(request: NextRequest) {
       professional: professionalCategory,
       festival: hasFestival,
       logo,
+      calendarLayout: true,
     });
     const mimeType = imagePart.inlineData.mimeType || "image/png";
     const extension = mimeType === "image/jpeg" ? "jpg" : mimeType === "image/webp" ? "webp" : "png";

@@ -32,6 +32,7 @@ export interface BusinessIdentityDetails {
   professional: boolean;
   festival: boolean;
   logo: BusinessLogo | null;
+  calendarLayout?: boolean;
 }
 
 export async function readBusinessLogo(userId: number, fileName: unknown): Promise<BusinessLogo | null> {
@@ -102,6 +103,43 @@ export async function addBusinessIdentityOverlay(
     ? `Dr. ${safePersonName}`
     : safePersonName;
   if (!details.professional) return image;
+
+  if (details.calendarLayout) {
+    const footerHeight = Math.min(190, Math.max(128, Math.round(metadata.height * 0.19)));
+    const sidePadding = Math.round(width * 0.045);
+    const mobile = details.mobile.trim().slice(0, 24);
+    const addressFontSize = Math.max(11, Math.min(20, Math.round(width * 0.016)));
+    const phoneFontSize = Math.max(
+      12,
+      Math.min(34, Math.round(width * 0.028), Math.floor((width * 0.30) / Math.max(mobile.length * 0.58, 1))),
+    );
+    const addressLines = details.address.trim().slice(0, 180).split(/\s+/).filter(Boolean);
+    let firstAddressLine = "";
+    const maxAddressLength = Math.max(20, Math.floor((width * 0.48) / (addressFontSize * 0.58)));
+    while (addressLines.length && `${firstAddressLine} ${addressLines[0]}`.trim().length <= maxAddressLength) {
+      firstAddressLine = `${firstAddressLine} ${addressLines.shift()}`.trim();
+    }
+    const secondAddressLine = addressLines.join(" ");
+    const footerColor = details.festival ? "#8f1022" : "#10243c";
+    const footerSvg = Buffer.from(`
+      <svg width="${width}" height="${footerHeight}" viewBox="0 0 ${width} ${footerHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="${footerColor}"/>
+        <path d="M0 0 H${width} V${Math.round(footerHeight * 0.06)} Q${Math.round(width * 0.5)} ${Math.round(footerHeight * 0.16)} 0 ${Math.round(footerHeight * 0.06)} Z" fill="#efbd39"/>
+        ${firstAddressLine ? `<text x="${sidePadding}" y="${Math.round(footerHeight * (secondAddressLine ? 0.43 : 0.59))}"
+          font-family="Arial, sans-serif" font-size="${addressFontSize}" font-weight="600"
+          fill="#fff">${escapeXml(firstAddressLine)}</text>` : ""}
+        ${secondAddressLine ? `<text x="${sidePadding}" y="${Math.round(footerHeight * 0.70)}"
+          font-family="Arial, sans-serif" font-size="${addressFontSize}" font-weight="600"
+          fill="#fff">${escapeXml(secondAddressLine)}</text>` : ""}
+        ${mobile ? `<text x="${Math.round(width * 0.63)}" y="${Math.round(footerHeight * 0.61)}"
+          font-family="Arial, sans-serif" font-size="${phoneFontSize}" font-weight="700"
+          fill="#f5d36b">${escapeXml(mobile)}</text>` : ""}
+      </svg>
+    `);
+    return sharp(image)
+      .composite([{ input: footerSvg, left: 0, top: metadata.height - footerHeight }])
+      .toBuffer();
+  }
 
   const footerHeight = Math.min(220, Math.max(170, Math.round(metadata.height * 0.22)));
   const brandHeight = Math.min(130, Math.max(90, Math.round(metadata.height * 0.14)));
