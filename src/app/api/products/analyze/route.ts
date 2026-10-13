@@ -111,6 +111,23 @@ export async function OPTIONS(req: NextRequest) {
 const isAspectRatio = (value: unknown): value is AspectRatio =>
   typeof value === 'string' && (ALLOWED_ASPECT_RATIOS as string[]).includes(value);
 
+function parseOptionalProfessionalPhoto(value: unknown): { buffer: Buffer; mimeType: string } | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') throw new Error('Professional photo must be a base64 image.');
+
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match) throw new Error('Professional photo must be a JPG, PNG or WEBP image.');
+
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length || buffer.length > 10 * 1024 * 1024) {
+    throw new Error('Professional photo must be 10 MB or smaller.');
+  }
+  if (buffer.toString('base64') !== match[2]) {
+    throw new Error('Professional photo data is invalid.');
+  }
+  return { buffer, mimeType: match[1] };
+}
+
 /*
 |--------------------------------------------------------------------------
 | Retry Helper
@@ -226,11 +243,16 @@ function buildCreativePrompt(aiData: any, options: BannerOptions): string {
 
   const categoryLine = options.categoryName ? `Business category: ${options.categoryName}.` : '';
   const hasFestival = options.festivals.length > 0;
-  const professionalLines = options.professionalPhoto
-    ? getProfessionalBannerInstructions(options.businessType, hasFestival, !!options.logo)
+  const professionalCategory = isProfessionalPortraitCategory(options.businessType);
+  const professionalLines = professionalCategory
+    ? options.professionalPhoto
+      ? getProfessionalBannerInstructions(options.businessType, hasFestival, !!options.logo)
+      : ['Professional category design: create a polished business banner. A personal portrait is optional; do not invent or add a person when no portrait is supplied.']
     : [];
-  const politicalLines = options.professionalPhoto && isPoliticalCategory(options.businessType)
-    ? getPoliticalBannerInstructions(options.userPrompt || '')
+  const politicalLines = professionalCategory && isPoliticalCategory(options.businessType)
+    ? options.professionalPhoto
+      ? getPoliticalBannerInstructions(options.userPrompt || '')
+      : ['Political category banner: do not invent a portrait, party name, party symbol, flag, public office, promise, endorsement, slogan or contact detail.']
     : [];
   const festivalLines = getFestivalBannerInstructions(options.festivals, options.bannerLanguage);
 
@@ -273,7 +295,7 @@ ${getBannerLanguageInstructions(options.bannerLanguage).join('\n')}
 ${professionalLines.join('\n')}
 ${politicalLines.join('\n')}
 ${festivalLines.join('\n')}
-${options.professionalPhoto ? `Show a readable ${options.bannerLanguage === 'Hindi' ? 'अभी कॉल करें' : 'CALL NOW'} button, this exact mobile number "${options.mobile}", and this exact business address "${options.address}".` : ''}
+${professionalCategory ? `Show a readable ${options.bannerLanguage === 'Hindi' ? 'अभी कॉल करें' : 'CALL NOW'} button, this exact mobile number "${options.mobile}", and this exact business address "${options.address}".` : ''}
 
 TEXT:
 - Use the idea of this headline, translated naturally into ${options.bannerLanguage}: "${headline}".
@@ -325,7 +347,9 @@ async function generateCreativeBanner(
     }
 
     const hasFestival = options.festivals.length > 0;
-    const aspectRatio = options.professionalPhoto && hasFestival ? '16:9' : options.aspectRatio;
+    const aspectRatio = isProfessionalPortraitCategory(options.businessType) && hasFestival
+      ? '16:9'
+      : options.aspectRatio;
     const creativePrompt = buildCreativePrompt(aiData, { ...options, aspectRatio });
 
     console.log('Calling Gemini image generation...');
@@ -442,7 +466,7 @@ async function generateCreativeBanner(
       mobile: options.mobile,
       address: options.address,
       bannerLanguage: options.bannerLanguage,
-      professional: !!options.professionalPhoto,
+      professional: isProfessionalPortraitCategory(options.businessType),
       festival: hasFestival,
       logo: options.logo,
     });
@@ -589,6 +613,15 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
+    let uploadedProfessionalPhoto: { buffer: Buffer; mimeType: string } | null;
+    try {
+      uploadedProfessionalPhoto = parseOptionalProfessionalPhoto(body?.professionalPhotoDataUrl);
+    } catch (error) {
+      return json(
+        { success: false, message: error instanceof Error ? error.message : 'Invalid professional photo.' },
+        { status: 422 }
+      );
+    }
     let selectedFestivals: Festival[];
     try {
       selectedFestivals = await getSelectedUpcomingFestivals(body?.festivalIds ?? []);
@@ -727,12 +760,9 @@ export async function POST(req: NextRequest) {
     );
     const businessType = `${businessDetails?.industry || ''} ${businessCategoryName || ''}`;
     const professionalPhoto = professionalCategory
-      ? await readProfessionalBannerPhoto(product.userId, businessDetails?.professionalPhoto)
+      ? uploadedProfessionalPhoto ?? await readProfessionalBannerPhoto(product.userId, businessDetails?.professionalPhoto)
       : null;
     const businessLogo = await readBusinessLogo(product.userId, businessDetails?.logo);
-    if (professionalCategory && !professionalPhoto) {
-      throw new Error('Upload a professional photo in Business Setup before generating this banner.');
-    }
     const businessAddress = [
       businessDetails?.address,
       businessDetails?.city,

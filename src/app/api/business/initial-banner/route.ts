@@ -140,9 +140,6 @@ export async function POST(request: NextRequest) {
       professionalPhoto = portrait
         ? { buffer: Buffer.from(await portrait.arrayBuffer()), mimeType: portrait.type }
         : await readProfessionalBannerPhoto(userId, profile.professional_photo);
-      if (!professionalPhoto) {
-        return json({ success: false, error: "Upload a professional photo in Business Setup before creating this banner." }, 422);
-      }
     }
     const strategyName = stringValue(profile.strategy_name, 100) || "AarnexAi AI-selected strategy";
     const strategyObjective = stringValue(profile.strategy_objective, 1000);
@@ -259,10 +256,18 @@ export async function POST(request: NextRequest) {
       `First-day campaign topic: ${stringValue(profile.topic_title, 255)}`,
       `Campaign creative direction: ${imagePrompt}`,
       `Business location: ${[profile.city, profile.state, profile.country].map((value) => stringValue(value, 100)).filter(Boolean).join(", ")}`,
-      ...(professionalCategory ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, hasFestival, !!logo) : []),
+      ...(professionalCategory && professionalPhoto
+        ? getProfessionalBannerInstructions(`${stringValue(profile.industry_name, 100)} ${categoryName}`, hasFestival, !!logo)
+        : professionalCategory
+          ? ["Professional category banner: create a polished business design. A personal portrait is optional; do not invent or add a person if no portrait is supplied."]
+          : []),
       ...getBannerLanguageInstructions(bannerLanguage),
       ...getFestivalBannerInstructions(selectedFestivals, bannerLanguage),
-      ...(politicalCategory ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255)) : []),
+      ...(politicalCategory && professionalPhoto
+        ? getPoliticalBannerInstructions(stringValue(profile.topic_title, 255))
+        : politicalCategory
+          ? ["Political category banner: do not invent a portrait, party name, party symbol, flag, public office, promise, endorsement, slogan or contact detail."]
+          : []),
       `Use a ${professionalCategory && hasFestival ? "wide landscape 16:9" : "square 1:1"} social-media layout with readable typography and a clear visual hierarchy.`,
       "Show the exact business or clinic name clearly. Preserve the supplied logo as-is; do not redraw, distort, or replace it.",
       "Do not invent prices, discounts, contact details, product claims, or additional brand names.",

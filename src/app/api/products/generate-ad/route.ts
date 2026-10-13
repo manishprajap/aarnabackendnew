@@ -109,11 +109,12 @@ function buildAdPrompt(opts: {
   hasLogo: boolean;
   categoryName: string | null;
   businessType: string;
+  professionalCategory: boolean;
   professionalPhoto: boolean;
   festivals: Festival[];
   bannerLanguage: 'Hindi' | 'English';
 }) {
-  const { product, conceptPrompt, aspectRatio, overlay, hasLogo, categoryName, businessType, professionalPhoto, festivals, bannerLanguage } = opts;
+  const { product, conceptPrompt, aspectRatio, overlay, hasLogo, categoryName, businessType, professionalCategory, professionalPhoto, festivals, bannerLanguage } = opts;
 
   const name = product.title || 'this product';
   const brand = product.brand ? ` by ${product.brand}` : '';
@@ -126,14 +127,16 @@ function buildAdPrompt(opts: {
   if (overlay.cta) overlayLines.push(`- Add a call-to-action button/text expressing "${overlay.cta}" in ${bannerLanguage}.`);
   if (overlay.phone) overlayLines.push(`- Include the contact number in small text: "${overlay.phone}"`);
   if (overlay.website) overlayLines.push(`- Include the website/handle in small text: "${overlay.website}"`);
-  if (professionalPhoto) {
+  if (professionalCategory) {
     overlayLines.push(`- Add a highly visible "${bannerLanguage === 'Hindi' ? 'अभी कॉल करें' : 'CALL NOW'}" button and the verified contact number "${overlay.phone}".`);
     overlayLines.push(`- Show this exact business address clearly: "${overlay.address}".`);
   }
   if (hasLogo) overlayLines.push('- Place the supplied logo image in a corner as a small, tasteful watermark. Do not distort or recolor the logo.');
   const hasFestival = festivals.length > 0;
-  const profileInstructions = professionalPhoto
-    ? getProfessionalBannerInstructions(businessType, hasFestival, hasLogo)
+  const profileInstructions = professionalCategory
+    ? professionalPhoto
+      ? getProfessionalBannerInstructions(businessType, hasFestival, hasLogo)
+      : ['Professional category design: create a polished business banner. A personal portrait is optional; do not invent or add a person when no portrait is supplied.']
     : [];
   const politicalInstructions = professionalPhoto && isPoliticalCategory(businessType)
     ? getPoliticalBannerInstructions(conceptPrompt)
@@ -418,12 +421,6 @@ export async function POST(req: NextRequest) {
     const professionalPhoto = professionalCategory
       ? await readProfessionalBannerPhoto(userId, business?.professionalPhoto)
       : null;
-    if (professionalCategory && !professionalPhoto) {
-      return NextResponse.json({
-        success: false,
-        message: 'Upload a professional photo in Business Setup before generating this banner.',
-      }, { status: 422 });
-    }
     const businessPhone = String(business?.mobile || phone || '').trim();
     const businessAddress = [
       business?.address,
@@ -479,6 +476,7 @@ export async function POST(req: NextRequest) {
       hasLogo: !!businessLogo,
       categoryName,
       businessType: `${business?.industryName || ''} ${categoryName || ''}`,
+      professionalCategory,
       professionalPhoto: !!professionalPhoto,
       festivals: selectedFestivals,
       bannerLanguage: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
@@ -541,7 +539,7 @@ export async function POST(req: NextRequest) {
       mobile: businessPhone,
       address: businessAddress,
       bannerLanguage: normalizeBannerLanguage(requestedBannerLanguage ?? business?.bannerLanguage),
-      professional: !!professionalPhoto,
+      professional: professionalCategory,
       festival: hasFestival,
       logo: businessLogo,
     });

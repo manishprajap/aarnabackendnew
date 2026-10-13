@@ -7,7 +7,6 @@ import path from "node:path";
 import { db } from "@/db";
 import { getUserIdFromRequest, AuthError } from "@/lib/auth";
 import { getUploadPublicPath, getUploadStoragePath } from "@/lib/uploadStorage";
-import { isProfessionalPortraitCategory } from "@/lib/politicalBanner";
 import { normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
   HttpError,
@@ -260,16 +259,6 @@ export async function POST(req: NextRequest) {
       strategy_id: b.strategy_id,
       automation_mode: automationMode,
     });
-
-    const professionalBusiness = isProfessionalPortraitCategory(`${sel.industry.name} ${sel.category.name}`);
-    if (professionalBusiness && !professionalPhotoFile) {
-      const savedPhoto = rowsOf(await db.execute(sql`
-        SELECT professional_photo FROM users WHERE id = ${userId} LIMIT 1
-      `))[0]?.professional_photo;
-      if (!savedPhoto) {
-        return json({ success: false, error: "Upload a clear professional photo for your banners." }, 422);
-      }
-    }
 
     let professionalPhotoFilename: string | null = null;
     if (professionalPhotoFile && professionalPhotoFile.size > 0) {
