@@ -1,7 +1,5 @@
 
-// src/lib/whatsapp-send.ts
-
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 
 import { db } from '@/db';
 import {
@@ -17,11 +15,20 @@ const GRAPH_URL = `https://graph.facebook.com/${
 
 export class WhatsAppSendError extends Error {
   status: number;
+  metaCode?: number;
+  metaSubcode?: number;
 
-  constructor(message: string, status = 400) {
+  constructor(
+    message: string,
+    status = 400,
+    metaCode?: number,
+    metaSubcode?: number
+  ) {
     super(message);
     this.name = 'WhatsAppSendError';
     this.status = status;
+    this.metaCode = metaCode;
+    this.metaSubcode = metaSubcode;
   }
 }
 
@@ -48,13 +55,13 @@ export type ConversationSummary = {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Helpers                                                                    */
+/* Phone and Meta error helpers                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Digits only, country code included. 10-digit numbers default to India (91). */
 export function normalizePhone(input: unknown): string | null {
   let digits = String(input ?? '').replace(/\D/g, '');
 
+  // India: automatically add country code for a 10-digit number.
   if (digits.length === 10) {
     digits = `91${digits}`;
   }
@@ -67,19 +74,19 @@ export function normalizePhone(input: unknown): string | null {
 function friendlyMetaError(error: any): string {
   switch (Number(error?.code)) {
     case 131047:
-      return 'More than 24 hours have passed since this customer last messaged you. Send an approved template message instead.';
+      return 'The 24-hour customer service window has expired. Send an approved WhatsApp template message instead.';
 
     case 133010:
-      return 'This phone number is not registered for WhatsApp Cloud API messaging. Check its registration status and onboarding in Meta WhatsApp Manager.';
+      return 'Meta reports that the sender WhatsApp phone number is not registered for Cloud API messaging. Verify the saved Phone Number ID and complete registration in Meta WhatsApp Manager.';
 
     case 131030:
-      return 'This number is not in the allowed recipient list of your WhatsApp test account.';
+      return 'This recipient is not on the allowed recipient list for your WhatsApp test account.';
 
     case 131026:
-      return 'Message could not be delivered. The number may not be on WhatsApp or may not be reachable.';
+      return 'Meta could not deliver the message. Verify that the recipient can receive WhatsApp messages.';
 
     case 190:
-      return 'WhatsApp access token is invalid or expired. Reconnect your WhatsApp account.';
+      return 'The WhatsApp access token is invalid or expired. Reconnect the WhatsApp account.';
 
     default:
       return (
@@ -90,43 +97,72 @@ function friendlyMetaError(error: any): string {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Meta API helper                                                            */
+/* -------------------------------------------------------------------------- */
+
 async function metaFetch(
   path: string,
   accessToken: string,
   init: RequestInit = {}
-) {
-  const response = await fetch(`${GRAPH_URL}/${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...(init.headers || {}),
-    },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(20000),
-  });
+): Promise<any> {
+  let response: Response;
+  let data: any;
 
-  const data = await response.json().catch(() => ({}));
+  try {
+    response = await fetch(`${GRAPH_URL}/${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(init.headers || {}),
+      },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(20000),
+    });
+
+    data = await response.json().catch(() => ({}));
+  } catch (error) {
+    console.error('[WhatsApp Send] Meta request failed:', {
+      path,
+      message:
+        error instanceof Error ? error.message : 'Network error',
+    });
+
+    throw new WhatsAppSendError(
+      'Could not connect to Meta WhatsApp API. Please try again.',
+      502
+    );
+  }
 
   if (!response.ok) {
-    console.error('[WhatsApp Send] Meta error:', {
+    const code = Number(data?.error?.code) || undefined;
+    const subcode =
+      Number(data?.error?.error_subcode) || undefined;
+
+    // Never log the access token or request authorization headers.
+    console.error('[WhatsApp Send] Meta API error:', {
       path,
-      status: response.status,
-      code: data?.error?.code,
-      subcode: data?.error?.error_subcode,
+      httpStatus: response.status,
+      code,
+      subcode,
       message: data?.error?.message,
+      fbtrace_id: data?.error?.fbtrace_id,
     });
 
     const status =
-      Number(data?.error?.code) === 190 ||
-      response.status === 401
+      code === 190 || response.status === 401
         ? 401
         : response.status === 429
           ? 429
-          : 400;
+          : response.status >= 500
+            ? 502
+            : 400;
 
     throw new WhatsAppSendError(
       friendlyMetaError(data?.error),
-      status
+      status,
+      code,
+      subcode
     );
   }
 
@@ -134,7 +170,7 @@ async function metaFetch(
 }
 
 /* -------------------------------------------------------------------------- */
-/* Connection                                                                 */
+/* Active WhatsApp connection                                                 */
 /* -------------------------------------------------------------------------- */
 
 export async function getActiveConnection(
@@ -148,17 +184,24 @@ export async function getActiveConnection(
       status: whatsappConnections.status,
     })
     .from(whatsappConnections)
-    .where(eq(whatsappConnections.userId, userId))
+    .where(
+      and(
+        eq(whatsappConnections.userId, userId),
+        eq(whatsappConnections.status, 'active')
+      )
+    )
+    // If more than one active connection exists, select the newest row.
+    .orderBy(desc(whatsappConnections.id))
     .limit(1);
 
   if (
     !connection ||
-    connection.status !== 'active' ||
     !connection.phoneNumberId ||
     !connection.accessToken
   ) {
     throw new WhatsAppSendError(
-      'WhatsApp is not connected. Please connect your number first.'
+      'No active WhatsApp connection found for this account. Please reconnect your WhatsApp number.',
+      400
     );
   }
 
@@ -167,7 +210,7 @@ export async function getActiveConnection(
     new Date(connection.tokenExpiresAt).getTime() <= Date.now()
   ) {
     throw new WhatsAppSendError(
-      'WhatsApp connection expired. Please reconnect your number.',
+      'The WhatsApp access token has expired. Reconnect your WhatsApp account.',
       401
     );
   }
@@ -179,7 +222,7 @@ export async function getActiveConnection(
 }
 
 /* -------------------------------------------------------------------------- */
-/* Contact + conversation                                                     */
+/* Contact and conversation                                                   */
 /* -------------------------------------------------------------------------- */
 
 export async function findOrCreateConversation(
@@ -190,6 +233,14 @@ export async function findOrCreateConversation(
   contact: ContactSummary;
   conversation: ConversationSummary;
 }> {
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) {
+    throw new WhatsAppSendError(
+      'Invalid recipient phone number. Enter a valid number with country code.'
+    );
+  }
+
   const [existingContact] = await db
     .select({
       id: whatsappContacts.id,
@@ -203,7 +254,7 @@ export async function findOrCreateConversation(
     .where(
       and(
         eq(whatsappContacts.userId, userId),
-        eq(whatsappContacts.phoneNumber, phone)
+        eq(whatsappContacts.phoneNumber, normalizedPhone)
       )
     )
     .limit(1);
@@ -215,18 +266,25 @@ export async function findOrCreateConversation(
       .insert(whatsappContacts)
       .values({
         userId,
-        waId: phone,
-        phoneNumber: phone,
+        waId: normalizedPhone,
+        phoneNumber: normalizedPhone,
         isActive: true,
         lastSeenAt: new Date(),
         metadata: { source: 'app_outbound' },
       })
       .$returningId();
 
+    if (!created?.id) {
+      throw new WhatsAppSendError(
+        'Could not create the WhatsApp contact.',
+        500
+      );
+    }
+
     contact = {
       id: created.id,
-      waId: phone,
-      phoneNumber: phone,
+      waId: normalizedPhone,
+      phoneNumber: normalizedPhone,
       name: null,
       profileName: null,
       avatarUrl: null,
@@ -274,6 +332,13 @@ export async function findOrCreateConversation(
     })
     .$returningId();
 
+  if (!createdConversation?.id) {
+    throw new WhatsAppSendError(
+      'Could not create the WhatsApp conversation.',
+      500
+    );
+  }
+
   return {
     contact,
     conversation: {
@@ -287,7 +352,7 @@ export async function findOrCreateConversation(
 }
 
 /* -------------------------------------------------------------------------- */
-/* Store outbound                                                             */
+/* Save outbound message                                                      */
 /* -------------------------------------------------------------------------- */
 
 async function storeOutbound(params: {
@@ -318,26 +383,26 @@ async function storeOutbound(params: {
     metadata: params.metadata,
   });
 
-  await db
-    .update(whatsappConversations)
-    .set({
-      lastMessageText: params.text || `[${params.type}]`,
-      lastMessageAt: now,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(
-          whatsappConversations.id,
-          params.conversationId
-        ),
-        eq(whatsappConversations.userId, params.userId)
-      )
-    );
+  // Only successful sends update the conversation's last-message preview.
+  if (params.status === 'sent') {
+    await db
+      .update(whatsappConversations)
+      .set({
+        lastMessageText: params.text || `[${params.type}]`,
+        lastMessageAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(whatsappConversations.id, params.conversationId),
+          eq(whatsappConversations.userId, params.userId)
+        )
+      );
+  }
 }
 
 /* -------------------------------------------------------------------------- */
-/* Send                                                                       */
+/* Send text or media                                                         */
 /* -------------------------------------------------------------------------- */
 
 export async function sendOutbound(input: {
@@ -348,30 +413,24 @@ export async function sendOutbound(input: {
   text?: string;
   file?: File | null;
 }): Promise<{ waMessageId: string }> {
-  const {
-    userId,
-    conversationId,
-    connection,
-    to,
-  } = input;
-
+  const { userId, conversationId, connection } = input;
   const text = (input.text || '').trim();
-  const file =
-    input.file && input.file.size > 0 ? input.file : null;
+  const file = input.file && input.file.size > 0 ? input.file : null;
+  const to = normalizePhone(input.to);
 
   let type = 'text';
   let metadata: Record<string, unknown> = {};
   let waMessageId = '';
 
-  if (!/^\d{11,15}$/.test(to)) {
+  if (!to) {
     throw new WhatsAppSendError(
-      'Invalid recipient phone number. Include the country code.'
+      'Invalid recipient phone number. Enter a valid number with country code.'
     );
   }
 
   if (!connection.phoneNumberId || !connection.accessToken) {
     throw new WhatsAppSendError(
-      'WhatsApp connection is missing its Phone Number ID or access token.'
+      'The WhatsApp connection is missing its Phone Number ID or access token.'
     );
   }
 
@@ -392,7 +451,6 @@ export async function sendOutbound(input: {
           : 'document';
 
       const form = new FormData();
-
       form.append('messaging_product', 'whatsapp');
       form.append('type', file.type || 'application/octet-stream');
       form.append('file', file, file.name);
@@ -410,7 +468,7 @@ export async function sendOutbound(input: {
 
       if (!mediaId) {
         throw new WhatsAppSendError(
-          'Media upload to WhatsApp failed.'
+          'Meta did not return a media ID after upload.'
         );
       }
 
@@ -424,9 +482,7 @@ export async function sendOutbound(input: {
         type,
         [type]: {
           id: mediaId,
-          ...(text && type !== 'document'
-            ? { caption: text }
-            : {}),
+          ...(text && type !== 'document' ? { caption: text } : {}),
           ...(type === 'document'
             ? {
                 filename: file.name,
@@ -466,7 +522,7 @@ export async function sendOutbound(input: {
 
     if (!waMessageId) {
       throw new WhatsAppSendError(
-        'WhatsApp did not return a message ID.'
+        'Meta did not return a WhatsApp message ID.'
       );
     }
   } catch (error) {
@@ -474,8 +530,8 @@ export async function sendOutbound(input: {
       error instanceof WhatsAppSendError
         ? error
         : new WhatsAppSendError(
-            'WhatsApp could not send this message.',
-            500
+            'WhatsApp could not send this message. Please try again.',
+            502
           );
 
     await storeOutbound({
@@ -488,7 +544,15 @@ export async function sendOutbound(input: {
         .slice(2, 8)}`,
       status: 'failed',
       errorMessage: sendError.message,
-      metadata,
+      metadata: {
+        ...metadata,
+        ...(sendError.metaCode
+          ? { metaCode: sendError.metaCode }
+          : {}),
+        ...(sendError.metaSubcode
+          ? { metaSubcode: sendError.metaSubcode }
+          : {}),
+      },
     }).catch((storeError) => {
       console.error(
         '[WhatsApp Send] Could not store failed message:',

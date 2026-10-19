@@ -139,6 +139,7 @@ export async function POST(req: NextRequest, context: RouteContext) {
     });
 
     return json(origin, { success: true });
+    
   } catch (error) {
     return handleError(origin, error, '[WhatsApp Messages POST]');
   }

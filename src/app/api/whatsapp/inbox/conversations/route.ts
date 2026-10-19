@@ -1,4 +1,6 @@
-// src/app/api/whatsapp/inbox/conversations/route.ts
+
+ // src/app/api/whatsapp/inbox/conversations/route.ts
+
 import { NextRequest, NextResponse } from 'next/server';
 import { desc, eq } from 'drizzle-orm';
 
@@ -6,29 +8,70 @@ import { db } from '@/db';
 import { whatsappContacts, whatsappConversations } from '@/db/schema';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
-import { findOrCreateConversation, getActiveConnection, normalizePhone, sendOutbound, WhatsAppSendError } from '@/lib/whatsapp-send';
+import {
+  findOrCreateConversation,
+  getActiveConnection,
+  normalizePhone,
+  sendOutbound,
+  WhatsAppSendError,
+} from '@/lib/whatsapp-send';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function json(origin: string | null, body: unknown, status = 200) {
-  return NextResponse.json(body, { status, headers: corsHeaders(origin) });
+function json(
+  origin: string | null,
+  body: unknown,
+  status = 200
+) {
+  return NextResponse.json(body, {
+    status,
+    headers: corsHeaders(origin),
+  });
 }
 
-function handleError(origin: string | null, error: unknown, label: string) {
+function handleError(
+  origin: string | null,
+  error: unknown,
+  label: string
+) {
   if (error instanceof AuthError) {
-    return json(origin, { success: false, message: error.message }, 401);
+    return json(
+      origin,
+      { success: false, message: error.message },
+      401
+    );
   }
+
   if (error instanceof WhatsAppSendError) {
-    return json(origin, { success: false, message: error.message }, error.status);
+    return json(
+      origin,
+      { success: false, message: error.message },
+      error.status
+    );
   }
+
   console.error(label, error);
-  return json(origin, { success: false, message: 'Request failed. Please try again.' }, 500);
+
+  return json(
+    origin,
+    {
+      success: false,
+      message: 'Request failed. Please check the server logs and try again.',
+    },
+    500
+  );
 }
 
-async function currentUserId(req: NextRequest): Promise<number | null> {
-  const id = Number(await getUserIdFromRequest(req));
-  return Number.isFinite(id) && id > 0 ? id : null;
+async function currentUserId(
+  req: NextRequest
+): Promise<number | null> {
+  const rawUserId = await getUserIdFromRequest(req);
+  const userId = Number(rawUserId);
+
+  return Number.isSafeInteger(userId) && userId > 0
+    ? userId
+    : null;
 }
 
 export async function OPTIONS(req: NextRequest) {
@@ -38,16 +81,23 @@ export async function OPTIONS(req: NextRequest) {
   });
 }
 
-/* =====================================================
-   GET — list conversations
-===================================================== */
+/* -------------------------------------------------------
+   GET: List conversations for the authenticated user
+------------------------------------------------------- */
 
 export async function GET(req: NextRequest) {
   const origin = req.headers.get('origin');
 
   try {
     const userId = await currentUserId(req);
-    if (!userId) return json(origin, { success: false, message: 'Unauthorized' }, 401);
+
+    if (!userId) {
+      return json(
+        origin,
+        { success: false, message: 'Unauthorized' },
+        401
+      );
+    }
 
     const conversations = await db
       .select({
@@ -66,52 +116,115 @@ export async function GET(req: NextRequest) {
         },
       })
       .from(whatsappConversations)
-      .innerJoin(whatsappContacts, eq(whatsappConversations.contactId, whatsappContacts.id))
+      .innerJoin(
+        whatsappContacts,
+        eq(
+          whatsappConversations.contactId,
+          whatsappContacts.id
+        )
+      )
       .where(eq(whatsappConversations.userId, userId))
       .orderBy(desc(whatsappConversations.lastMessageAt));
 
-    return json(origin, { success: true, conversations });
+    return json(origin, {
+      success: true,
+      conversations,
+    });
   } catch (error) {
-    return handleError(origin, error, '[WhatsApp Inbox GET]');
+    return handleError(
+      origin,
+      error,
+      '[WhatsApp Inbox GET]'
+    );
   }
 }
 
-/* =====================================================
-   POST — start a new conversation + send first message
-   body: { phoneNumber, text }
-===================================================== */
+/* -------------------------------------------------------
+   POST: Create/find conversation and send first message
+
+   Body:
+   {
+     "phoneNumber": "917521024187",
+     "text": "Testing purpose"
+   }
+------------------------------------------------------- */
 
 export async function POST(req: NextRequest) {
   const origin = req.headers.get('origin');
 
   try {
     const userId = await currentUserId(req);
-    if (!userId) return json(origin, { success: false, message: 'Unauthorized' }, 401);
 
-    const body = await req.json().catch(() => ({}));
+    if (!userId) {
+      return json(
+        origin,
+        { success: false, message: 'Unauthorized' },
+        401
+      );
+    }
+
+    let body: {
+      phoneNumber?: unknown;
+      text?: unknown;
+    };
+
+    try {
+      body = await req.json();
+    } catch {
+      return json(
+        origin,
+        { success: false, message: 'Invalid JSON request body.' },
+        400
+      );
+    }
+
     const phone = normalizePhone(body?.phoneNumber);
-    const text = typeof body?.text === 'string' ? body.text.trim() : '';
+    const text =
+      typeof body?.text === 'string'
+        ? body.text.trim()
+        : '';
 
     if (!phone) {
       return json(
         origin,
-        { success: false, message: 'Enter a valid phone number with country code.' },
+        {
+          success: false,
+          message:
+            'Enter a valid recipient phone number with country code, for example 919876543210.',
+        },
         400
       );
     }
+
     if (!text) {
-      return json(origin, { success: false, message: 'Message text is required.' }, 400);
+      return json(
+        origin,
+        {
+          success: false,
+          message: 'Message text is required.',
+        },
+        400
+      );
     }
 
+    // Use the authenticated user's active WhatsApp connection.
     const connection = await getActiveConnection(userId);
-    const { contact, conversation } = await findOrCreateConversation(
-      userId,
-      connection.phoneNumberId,
-      phone
-    );
 
-    // Throws WhatsAppSendError (after saving a "failed" bubble) if Meta rejects it.
-    await sendOutbound({
+    // Log identifiers only. Never log the access token.
+    console.info('[WhatsApp Inbox POST] Sending message', {
+      userId,
+      phoneNumberId: connection.phoneNumberId,
+      recipient: phone,
+    });
+
+    const { contact, conversation } =
+      await findOrCreateConversation(
+        userId,
+        connection.phoneNumberId,
+        phone
+      );
+
+    const result = await sendOutbound({
       userId,
       conversationId: conversation.id,
       connection,
@@ -121,6 +234,7 @@ export async function POST(req: NextRequest) {
 
     return json(origin, {
       success: true,
+      message: 'WhatsApp message accepted by Meta.',
       conversation: {
         id: conversation.id,
         status: conversation.status ?? 'open',
@@ -129,8 +243,13 @@ export async function POST(req: NextRequest) {
         unreadCount: conversation.unreadCount ?? 0,
         contact,
       },
+      messageId: result.waMessageId,
     });
   } catch (error) {
-    return handleError(origin, error, '[WhatsApp Inbox POST]');
+    return handleError(
+      origin,
+      error,
+      '[WhatsApp Inbox POST]'
+    );
   }
 }
