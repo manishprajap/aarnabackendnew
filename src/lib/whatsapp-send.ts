@@ -68,6 +68,8 @@ function friendlyMetaError(error: any): string {
   switch (Number(error?.code)) {
     case 131047:
       return 'More than 24 hours have passed since this customer last messaged you. Send an approved template message instead.';
+    case 133010:
+      return 'This number is not registered for messaging yet. Open the Connection tab and tap "Activate messaging".';
     case 131030:
       return 'This number is not in the allowed recipient list of your WhatsApp test account.';
     case 131026:
