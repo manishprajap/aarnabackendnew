@@ -1,112 +1,136 @@
-import { NextRequest, NextResponse } from "next/server";
+// src/app/api/whatsapp/inbox/conversations/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { desc, eq } from 'drizzle-orm';
 
-import { db } from "@/db";
+import { db } from '@/db';
+import { whatsappContacts, whatsappConversations } from '@/db/schema';
+import { getUserIdFromRequest, AuthError } from '@/lib/auth';
+import { corsHeaders } from '@/lib/cors';
+import { findOrCreateConversation, getActiveConnection, normalizePhone, sendOutbound, WhatsAppSendError } from '@/lib/whatsapp-send';
 
-import {
-  whatsappConversations,
-  whatsappContacts,
-} from "@/db/schema";
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
-import {
-  eq,
-  and,
-  desc,
-} from "drizzle-orm";
+function json(origin: string | null, body: unknown, status = 200) {
+  return NextResponse.json(body, { status, headers: corsHeaders(origin) });
+}
 
-import { getUserIdFromRequest } from "@/lib/auth";
+function handleError(origin: string | null, error: unknown, label: string) {
+  if (error instanceof AuthError) {
+    return json(origin, { success: false, message: error.message }, 401);
+  }
+  if (error instanceof WhatsAppSendError) {
+    return json(origin, { success: false, message: error.message }, error.status);
+  }
+  console.error(label, error);
+  return json(origin, { success: false, message: 'Request failed. Please try again.' }, 500);
+}
 
+async function currentUserId(req: NextRequest): Promise<number | null> {
+  const id = Number(await getUserIdFromRequest(req));
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
 
-export async function GET(
-  request: NextRequest
-) {
+export async function OPTIONS(req: NextRequest) {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders(req.headers.get('origin')),
+  });
+}
+
+/* =====================================================
+   GET — list conversations
+===================================================== */
+
+export async function GET(req: NextRequest) {
+  const origin = req.headers.get('origin');
+
   try {
-    const userId =
-      await getUserIdFromRequest(request);
-
-    if (!userId) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Unauthorized",
-        },
-        { status: 401 }
-      );
-    }
+    const userId = await currentUserId(req);
+    if (!userId) return json(origin, { success: false, message: 'Unauthorized' }, 401);
 
     const conversations = await db
       .select({
-        id:
-          whatsappConversations.id,
-
-        status:
-          whatsappConversations.status,
-
-        lastMessageText:
-          whatsappConversations.lastMessageText,
-
-        lastMessageAt:
-          whatsappConversations.lastMessageAt,
-
-        unreadCount:
-          whatsappConversations.unreadCount,
-
+        id: whatsappConversations.id,
+        status: whatsappConversations.status,
+        lastMessageText: whatsappConversations.lastMessageText,
+        lastMessageAt: whatsappConversations.lastMessageAt,
+        unreadCount: whatsappConversations.unreadCount,
         contact: {
-          id:
-            whatsappContacts.id,
-
-          waId:
-            whatsappContacts.waId,
-
-          phoneNumber:
-            whatsappContacts.phoneNumber,
-
-          name:
-            whatsappContacts.name,
-
-          profileName:
-            whatsappContacts.profileName,
-
-          avatarUrl:
-            whatsappContacts.avatarUrl,
+          id: whatsappContacts.id,
+          waId: whatsappContacts.waId,
+          phoneNumber: whatsappContacts.phoneNumber,
+          name: whatsappContacts.name,
+          profileName: whatsappContacts.profileName,
+          avatarUrl: whatsappContacts.avatarUrl,
         },
       })
       .from(whatsappConversations)
-      .innerJoin(
-        whatsappContacts,
-        eq(
-          whatsappConversations.contactId,
-          whatsappContacts.id
-        )
-      )
-      .where(
-        eq(
-          whatsappConversations.userId,
-          userId
-        )
-      )
-      .orderBy(
-        desc(
-          whatsappConversations.lastMessageAt
-        )
-      );
+      .innerJoin(whatsappContacts, eq(whatsappConversations.contactId, whatsappContacts.id))
+      .where(eq(whatsappConversations.userId, userId))
+      .orderBy(desc(whatsappConversations.lastMessageAt));
 
-    return NextResponse.json({
+    return json(origin, { success: true, conversations });
+  } catch (error) {
+    return handleError(origin, error, '[WhatsApp Inbox GET]');
+  }
+}
+
+/* =====================================================
+   POST — start a new conversation + send first message
+   body: { phoneNumber, text }
+===================================================== */
+
+export async function POST(req: NextRequest) {
+  const origin = req.headers.get('origin');
+
+  try {
+    const userId = await currentUserId(req);
+    if (!userId) return json(origin, { success: false, message: 'Unauthorized' }, 401);
+
+    const body = await req.json().catch(() => ({}));
+    const phone = normalizePhone(body?.phoneNumber);
+    const text = typeof body?.text === 'string' ? body.text.trim() : '';
+
+    if (!phone) {
+      return json(
+        origin,
+        { success: false, message: 'Enter a valid phone number with country code.' },
+        400
+      );
+    }
+    if (!text) {
+      return json(origin, { success: false, message: 'Message text is required.' }, 400);
+    }
+
+    const connection = await getActiveConnection(userId);
+    const { contact, conversation } = await findOrCreateConversation(
+      userId,
+      connection.phoneNumberId,
+      phone
+    );
+
+    // Throws WhatsAppSendError (after saving a "failed" bubble) if Meta rejects it.
+    await sendOutbound({
+      userId,
+      conversationId: conversation.id,
+      connection,
+      to: phone,
+      text,
+    });
+
+    return json(origin, {
       success: true,
-      conversations,
+      conversation: {
+        id: conversation.id,
+        status: conversation.status ?? 'open',
+        lastMessageText: text,
+        lastMessageAt: new Date().toISOString(),
+        unreadCount: conversation.unreadCount ?? 0,
+        contact,
+      },
     });
   } catch (error) {
-    console.error(
-      "[WhatsApp Inbox GET]",
-      error
-    );
-
-    return NextResponse.json(
-      {
-        success: false,
-        message:
-          "Failed to load conversations",
-      },
-      { status: 500 }
-    );
+    return handleError(origin, error, '[WhatsApp Inbox POST]');
   }
 }
