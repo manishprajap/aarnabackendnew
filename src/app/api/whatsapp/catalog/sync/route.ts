@@ -31,7 +31,7 @@ const PLATFORM_CATALOG_TOKEN =
   process.env.META_CATALOG_ACCESS_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
 
 // Optional: only used to log which scopes a failing token really has.
-const META_APP_ID = process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || null;
+const META_FACEBOOK_APP_ID = process.env.META_FACEBOOK_APP_ID || process.env.FACEBOOK_APP_ID || null;
 const META_FACEBOOK_APP_SECRET =
   process.env.META_FACEBOOK_APP_SECRET || process.env.FACEBOOK_APP_SECRET || null;
 
@@ -100,11 +100,11 @@ async function graphRequest(
 
 /** Logs the scopes of a token (never the token itself). Debug aid only. */
 async function logTokenScopes(label: string, token: string) {
-  if (!META_APP_ID || !META_FACEBOOK_APP_SECRET) return;
+  if (!META_FACEBOOK_APP_ID || !META_FACEBOOK_APP_SECRET) return;
   try {
     const res = await fetch(
       `${GRAPH}/debug_token?input_token=${encodeURIComponent(token)}` +
-        `&access_token=${encodeURIComponent(`${META_APP_ID}|${META_FACEBOOK_APP_SECRET}`)}`
+        `&access_token=${encodeURIComponent(`${META_FACEBOOK_APP_ID}|${META_FACEBOOK_APP_SECRET}`)}`
     );
     const data: any = await res.json().catch(() => ({}));
     console.error(
