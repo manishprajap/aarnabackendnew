@@ -1,7 +1,5 @@
 // src/app/api/whatsapp/webhook/route.ts
-//
-// IMPORTANT: folder ka naam lowercase `whatsapp` hona chahiye (pehle `WhatsApp` tha).
-// Linux/Vercel par URL case-sensitive hai, isliye Meta ka /api/whatsapp/webhook 404 deta tha.
+// Folder ka naam lowercase `whatsapp` hi rakhein (Linux/Vercel par URL case-sensitive hai).
 
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
@@ -20,17 +18,14 @@ export const dynamic = 'force-dynamic';
 
 /* =====================================================
    GET — Meta webhook verification
-   hub.mode, hub.verify_token, hub.challenge
 ===================================================== */
 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-
     const mode = searchParams.get('hub.mode');
     const token = searchParams.get('hub.verify_token');
     const challenge = searchParams.get('hub.challenge');
-
     const verifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN?.trim();
 
     if (!verifyToken) {
@@ -54,7 +49,6 @@ export async function GET(request: NextRequest) {
       tokenReceived: Boolean(token),
       tokenMatch: token === verifyToken,
     });
-
     return new NextResponse('Forbidden', {
       status: 403,
       headers: { 'Content-Type': 'text/plain' },
@@ -73,14 +67,12 @@ export async function GET(request: NextRequest) {
 ===================================================== */
 
 function isValidSignature(rawBody: string, signatureHeader: string | null): boolean {
-  // Dono env names support: pehle META_APP_SECRET, fir purana META_FACEBOOK_APP_SECRET
   const appSecret = (process.env.META_APP_SECRET || process.env.META_FACEBOOK_APP_SECRET)?.trim();
 
   if (!appSecret) {
     console.error('[WhatsApp Webhook] META_APP_SECRET (or META_FACEBOOK_APP_SECRET) is missing');
     return false;
   }
-
   if (!signatureHeader) {
     console.warn('[WhatsApp Webhook] Missing X-Hub-Signature-256 header');
     return false;
@@ -100,12 +92,81 @@ function isValidSignature(rawBody: string, signatureHeader: string | null): bool
 }
 
 /* =====================================================
+   Status helpers
+   - status sirf aage badhe (sent -> delivered -> read)
+   - agar row abhi insert nahi hui (race), thoda ruk kar retry
+===================================================== */
+
+const STATUS_RANK: Record<string, number> = {
+  failed: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function applyStatusUpdate(userId: number, status: any) {
+  const waMessageId = String(status.id);
+  const statusName = String(status.status || '').toLowerCase();
+  if (!(statusName in STATUS_RANK)) return;
+
+  const statusDate = Number(status.timestamp)
+    ? new Date(Number(status.timestamp) * 1000)
+    : new Date();
+
+  // Webhook outbound insert se pehle aa sakta hai -> 3 baar try (1s gap)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const [row] = await db
+      .select({ id: whatsappMessages.id, status: whatsappMessages.status })
+      .from(whatsappMessages)
+      .where(
+        and(
+          eq(whatsappMessages.userId, userId),
+          eq(whatsappMessages.waMessageId, waMessageId)
+        )
+      )
+      .limit(1);
+
+    if (!row) {
+      if (attempt < 2) {
+            await sleep(1000);
+            continue;
+      }
+      console.warn('[WhatsApp Webhook] Status for unknown message:', waMessageId, statusName);
+      return;
+    }
+
+    const currentRank = STATUS_RANK[String(row.status || '').toLowerCase()] ?? 0;
+    const newRank = STATUS_RANK[statusName];
+
+    // Purana/late status ignore karo (jaise read ke baad delivered)
+    if (statusName !== 'failed' && newRank <= currentRank) return;
+    // Already delivered/read ho chuka ho to failed se overwrite mat karo
+    if (statusName === 'failed' && currentRank >= STATUS_RANK.delivered) return;
+
+    await db
+      .update(whatsappMessages)
+      .set({
+        status: statusName,
+        ...(statusName === 'sent' ? { sentAt: statusDate } : {}),
+        ...(statusName === 'delivered' ? { deliveredAt: statusDate } : {}),
+        ...(statusName === 'read' ? { readAt: statusDate } : {}),
+        ...(statusName === 'failed'
+          ? { errorMessage: String(status?.errors?.[0]?.title || 'Message delivery failed') }
+          : {}),
+      })
+      .where(eq(whatsappMessages.id, row.id));
+    return;
+  }
+}
+
+/* =====================================================
    POST — incoming events
 ===================================================== */
 
 export async function POST(request: NextRequest) {
   try {
-    // Raw text pehle padho taaki signature verify ho sake
     const rawBody = await request.text();
     const signature = request.headers.get('x-hub-signature-256');
 
@@ -131,11 +192,7 @@ export async function POST(request: NextRequest) {
         const field: string = change.field;
         const value = change.value;
 
-        /*
-         * Account events: PARTNER_ADDED, account_update, etc.
-         * Row sirf tab update hoti hai jab /whatsapp/claim ne pehle se bana di ho
-         * (userId sirf claim route ko pata hota hai).
-         */
+        /* Account events */
         if (
           field === 'account_update' ||
           field === 'business_status_update' ||
@@ -154,7 +211,6 @@ export async function POST(request: NextRequest) {
             try {
               const businessPhoneNumber: string | undefined =
                 value?.display_phone_number || value?.phone_number;
-
               const businessName: string | undefined =
                 value?.verified_name || value?.business_name || value?.name;
 
@@ -169,7 +225,6 @@ export async function POST(request: NextRequest) {
                 })
                 .where(eq(whatsappConnections.wabaId, wabaId));
 
-              // mysql2 via Drizzle: [ResultSetHeader, FieldPacket[]]
               const affectedRows =
                 Array.isArray(updateResult) && updateResult[0]
                   ? (updateResult[0] as { affectedRows?: number }).affectedRows
@@ -194,7 +249,12 @@ export async function POST(request: NextRequest) {
           const phoneNumberId = value?.metadata?.phone_number_id;
           const displayPhoneNumber = value?.metadata?.display_phone_number;
 
-          console.log('[WhatsApp Webhook] Messages for:', { phoneNumberId, displayPhoneNumber });
+          console.log('[WhatsApp Webhook] Messages for:', {
+            phoneNumberId,
+            displayPhoneNumber,
+            incoming: (value?.messages || []).length,
+            statuses: (value?.statuses || []).length,
+          });
 
           const [connection] = phoneNumberId
             ? await db
@@ -216,6 +276,7 @@ export async function POST(request: NextRequest) {
             );
           }
 
+          /* ---------- Incoming messages ---------- */
           for (const message of value?.messages || []) {
             if (!connection) continue;
 
@@ -242,6 +303,7 @@ export async function POST(request: NextRequest) {
               (item: any) => String(item?.wa_id || '').replace(/\D/g, '') === sender
             );
             const profileName = String(contactInfo?.profile?.name || '').trim() || null;
+
             const [existingContact] = await db
               .select({
                 id: whatsappContacts.id,
@@ -302,15 +364,15 @@ export async function POST(request: NextRequest) {
                     message?.[messageType]?.caption ||
                       message?.interactive?.button_reply?.title ||
                       message?.interactive?.list_reply?.title ||
+                      message?.button?.text ||
                       ''
                   );
-            const mediaId = message?.[messageType]?.id
-              ? String(message[messageType].id)
-              : null;
+            const mediaId = message?.[messageType]?.id ? String(message[messageType].id) : null;
             const timestampSeconds = Number(message?.timestamp);
-            const messageDate = Number.isFinite(timestampSeconds) && timestampSeconds > 0
-              ? new Date(timestampSeconds * 1000)
-              : new Date();
+            const messageDate =
+              Number.isFinite(timestampSeconds) && timestampSeconds > 0
+                ? new Date(timestampSeconds * 1000)
+                : new Date();
 
             const [existingConversation] = await db
               .select({ id: whatsappConversations.id })
@@ -379,37 +441,23 @@ export async function POST(request: NextRequest) {
             });
           }
 
-          for (const status of value?.statuses || []) {
-            if (!connection || !status?.id) continue;
-            const statusName = String(status.status || '').toLowerCase();
-            if (!['sent', 'delivered', 'read', 'failed'].includes(statusName)) continue;
-
-            const statusDate = Number(status.timestamp)
-              ? new Date(Number(status.timestamp) * 1000)
-              : new Date();
-            await db
-              .update(whatsappMessages)
-              .set({
-                status: statusName,
-                ...(statusName === 'sent' ? { sentAt: statusDate } : {}),
-                ...(statusName === 'delivered' ? { deliveredAt: statusDate } : {}),
-                ...(statusName === 'read' ? { readAt: statusDate } : {}),
-                ...(statusName === 'failed'
-                  ? { errorMessage: String(status?.errors?.[0]?.title || 'Message delivery failed') }
-                  : {}),
-              })
-              .where(
-                and(
-                  eq(whatsappMessages.userId, connection.userId),
-                  eq(whatsappMessages.waMessageId, String(status.id))
+          /* ---------- Status updates (sent / delivered / read / failed) ---------- */
+          if (connection) {
+            const userId = connection.userId;
+            const validStatuses = (value?.statuses || []).filter((s: any) => s?.id);
+            // Parallel, taaki retry-wait ek hi baar lage
+            await Promise.all(
+              validStatuses.map((s: any) =>
+                applyStatusUpdate(userId, s).catch((err) =>
+                  console.error('[WhatsApp Webhook] Status update failed:', err)
                 )
-              );
+              )
+            );
           }
         }
       }
     }
 
-    // Meta ko hamesha jaldi 200 chahiye
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
     console.error('[WhatsApp Webhook] POST error:', error);
