@@ -67,7 +67,15 @@ export async function GET(request: NextRequest) {
     });
 
     const result = await response.json();
-
+    console.log('[WA templates diagnostic]', {
+      wabaId: connection.wabaId,
+      httpStatus: response.status,
+      count: Array.isArray(result.data)
+        ? result.data.length
+        : null,
+      metaError: result.error?.message ?? null,
+      paging: result.paging ?? null,
+    });
     if (!response.ok) {
       console.error(
         '[WhatsApp Templates] Meta API error:',
@@ -88,20 +96,20 @@ export async function GET(request: NextRequest) {
 
     const templates = Array.isArray(result.data)
       ? result.data.map((item: {
-          id?: string;
-          name?: string;
-          status?: string;
-          category?: string;
-          language?: string;
-          components?: unknown[];
-        }) => ({
-          id: item.id ?? item.name ?? '',
-          name: item.name ?? '',
-          status: item.status ?? '',
-          category: item.category ?? '',
-          language: item.language ?? '',
-          components: item.components ?? [],
-        }))
+        id?: string;
+        name?: string;
+        status?: string;
+        category?: string;
+        language?: string;
+        components?: unknown[];
+      }) => ({
+        id: item.id ?? item.name ?? '',
+        name: item.name ?? '',
+        status: item.status ?? '',
+        category: item.category ?? '',
+        language: item.language ?? '',
+        components: item.components ?? [],
+      }))
       : [];
 
     return NextResponse.json(
