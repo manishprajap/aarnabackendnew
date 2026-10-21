@@ -98,8 +98,7 @@ export async function GET(request: NextRequest) {
       '?fields=id,name,status,category,language,components&limit=100';
 
     let pageCount = 0;
-    let lastPaging: MetaResponse['paging'] = null;
-
+let lastPaging: NonNullable<MetaResponse['paging']> | null = null;
     // Guard against unexpected pagination loops.
     const MAX_PAGES = 20;
 
