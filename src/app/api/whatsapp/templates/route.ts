@@ -60,7 +60,13 @@ export async function GET(request: NextRequest) {
       .where(eq(whatsappConnections.userId, userId))
       .orderBy(desc(whatsappConnections.id))
       .limit(1);
-
+    console.log('[WA templates] Connection selected', {
+      authenticatedUserId: userId,
+      connectionId: connection.id,
+      connectionUserId: connection.userId,
+      wabaId: connection.wabaId,
+      status: connection.status,
+    });
     if (!connection) {
       return NextResponse.json(
         { success: false, error: 'WhatsApp account is not connected' },
@@ -98,7 +104,7 @@ export async function GET(request: NextRequest) {
       '?fields=id,name,status,category,language,components&limit=100';
 
     let pageCount = 0;
-let lastPaging: NonNullable<MetaResponse['paging']> | null = null;
+    let lastPaging: NonNullable<MetaResponse['paging']> | null = null;
     // Guard against unexpected pagination loops.
     const MAX_PAGES = 20;
 
