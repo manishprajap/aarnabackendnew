@@ -141,6 +141,84 @@ async function logTokenScopes(label: string, token: string) {
   }
 }
 
+/**
+ * Makes sure the catalog is linked to the seller's WhatsApp Business Account and that
+ * the catalog icon (and cart) is switched on for the seller's number. Best effort:
+ * never throws, returns what worked so the caller can report it.
+ */
+async function prepareWhatsAppCatalog(
+  wabaId: string,
+  metaCatalogId: string,
+  tokens: Array<string | null | undefined>,
+  phoneNumberId: string | null
+): Promise<{ linked: boolean; visible: boolean; note: string }> {
+  const result = { linked: false, visible: false, note: "" };
+  const usableTokens = Array.from(new Set(tokens.filter((t): t is string => Boolean(t))));
+
+  // 1) Catalog must be linked to the WABA.
+  for (const token of usableTokens) {
+    try {
+      const linked = await graphRequest(
+        "GET",
+        `${wabaId}/product_catalogs?fields=id&limit=25`,
+        token
+      );
+      const ids: string[] = (Array.isArray(linked?.data) ? linked.data : []).map((item: any) =>
+        String(item?.id)
+      );
+      if (!ids.includes(metaCatalogId)) {
+        await graphRequest("POST", `${wabaId}/product_catalogs`, token, {
+          catalog_id: metaCatalogId,
+        });
+      }
+      result.linked = true;
+      break;
+    } catch (error) {
+      console.error("[Catalog Sync] could not confirm WABA catalog link", error);
+    }
+  }
+
+  if (!result.linked) {
+    result.note = "Catalog could not be linked to the WhatsApp account.";
+    return result;
+  }
+
+  // 2) Show the catalog icon and cart in the WhatsApp chat.
+  for (const token of usableTokens) {
+    try {
+      let phoneIds: string[] = phoneNumberId ? [phoneNumberId] : [];
+      if (phoneIds.length === 0) {
+        const phones = await graphRequest(
+          "GET",
+          `${wabaId}/phone_numbers?fields=id&limit=10`,
+          token
+        );
+        phoneIds = (Array.isArray(phones?.data) ? phones.data : []).map((item: any) =>
+          String(item?.id)
+        );
+      }
+      if (phoneIds.length === 0) continue;
+
+      for (const phoneId of phoneIds) {
+        await graphRequest("POST", `${phoneId}/whatsapp_commerce_settings`, token, {
+          is_catalog_visible: true,
+          is_cart_enabled: true,
+        });
+      }
+      result.visible = true;
+      break;
+    } catch (error) {
+      console.error("[Catalog Sync] could not enable catalog visibility", error);
+    }
+  }
+
+  if (!result.visible) {
+    result.note = "Catalog is linked, but the catalog icon could not be enabled on WhatsApp.";
+  }
+
+  return result;
+}
+
 /** Catalog ID does not exist or the token cannot load it (code 100, subcode 33). */
 function isCatalogNotFound(error: unknown): boolean {
   return error instanceof MetaError && error.code === 100 && error.subcode === 33;
@@ -468,6 +546,59 @@ export async function POST(request: NextRequest) {
         .where(eq(whatsappCatalogs.id, catalogId));
     }
 
+    /* ---- Link to WhatsApp and show the catalog icon (best effort) ---- */
+
+    const connectionPhoneId =
+      String(
+        (connection as any).phoneNumberId ?? (connection as any).phone_number_id ?? ""
+      ).trim() || null;
+
+    let whatsappState = { linked: false, visible: false, note: "" };
+    if (wabaId && metaCatalogId) {
+      whatsappState = await prepareWhatsAppCatalog(
+        wabaId,
+        metaCatalogId,
+        [catalogToken, accessToken],
+        connectionPhoneId
+      );
+    }
+
+    /* ---- Remove deleted products from Meta (best effort) ---- */
+
+    let removed = 0;
+    try {
+      const inactiveProducts = await db
+        .select()
+        .from(whatsappProducts)
+        .where(
+          and(
+            eq(whatsappProducts.catalogId, catalogId),
+            eq(whatsappProducts.isActive, false)
+          )
+        );
+
+      const toRemove = inactiveProducts.filter((p) => Boolean(p.retailerId));
+
+      for (let i = 0; i < toRemove.length; i += BATCH_SIZE) {
+        const chunk = toRemove.slice(i, i + BATCH_SIZE);
+        try {
+          await graphRequest("POST", `${metaCatalogId}/items_batch`, catalogToken, {
+            allow_upsert: true,
+            item_type: "PRODUCT_ITEM",
+            requests: chunk.map((p) => ({
+              method: "DELETE",
+              data: { id: p.retailerId },
+            })),
+          });
+          removed += chunk.length;
+        } catch (error) {
+          console.error("[Catalog Sync] removing deleted products failed", error);
+        }
+      }
+    } catch (error) {
+      console.error("[Catalog Sync] could not load deleted products", error);
+    }
+
     /* ---- Products to push ---- */
 
     const products = await db
@@ -486,6 +617,10 @@ export async function POST(request: NextRequest) {
         message: "Catalog is linked with Meta. There are no products to sync yet.",
         synced: 0,
         failed: 0,
+        removed,
+        linkedToWhatsApp: whatsappState.linked,
+        catalogVisible: whatsappState.visible,
+        note: whatsappState.note || undefined,
       });
     }
 
@@ -574,6 +709,10 @@ export async function POST(request: NextRequest) {
           : `${synced} products sent to Meta. Meta may take a few minutes to review them.`,
       synced,
       failed,
+      removed,
+      linkedToWhatsApp: whatsappState.linked,
+      catalogVisible: whatsappState.visible,
+      note: whatsappState.note || undefined,
     });
   } catch (error) {
     console.error("[WhatsApp Catalog Sync]", error);
