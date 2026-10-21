@@ -1,5 +1,6 @@
-// src/app/api/whatsapp/webhook/route.ts
-// Folder ka naam lowercase `whatsapp` hi rakhein (Linux/Vercel par URL case-sensitive hai).
+
+ // src/app/api/whatsapp/webhook/route.ts
+// Keep the folder name lowercase as `whatsapp` because URLs are case-sensitive on Linux/Vercel.
 
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
@@ -30,8 +31,10 @@ export async function GET(request: NextRequest) {
     const verifyToken = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN?.trim();
 
     if (!verifyToken) {
-      console.error('[WhatsApp Webhook] WHATSAPP_WEBHOOK_VERIFY_TOKEN is missing');
-      return new NextResponse('Webhook verify token not configured', {
+      console.error(
+        '[WhatsApp Webhook] WHATSAPP_WEBHOOK_VERIFY_TOKEN is missing'
+      );
+      return new NextResponse('Webhook verification token is not configured', {
         status: 500,
         headers: { 'Content-Type': 'text/plain' },
       });
@@ -50,12 +53,13 @@ export async function GET(request: NextRequest) {
       tokenReceived: Boolean(token),
       tokenMatch: token === verifyToken,
     });
+
     return new NextResponse('Forbidden', {
       status: 403,
       headers: { 'Content-Type': 'text/plain' },
     });
   } catch (error) {
-    console.error('[WhatsApp Webhook] GET error:', error);
+    console.error('[WhatsApp Webhook] GET request failed:', error);
     return new NextResponse('Internal Server Error', {
       status: 500,
       headers: { 'Content-Type': 'text/plain' },
@@ -64,7 +68,7 @@ export async function GET(request: NextRequest) {
 }
 
 /* =====================================================
-   Signature check (X-Hub-Signature-256)
+   Signature verification (X-Hub-Signature-256)
 ===================================================== */
 
 const SECRET_ENV_NAMES = [
@@ -74,17 +78,31 @@ const SECRET_ENV_NAMES = [
   'FACEBOOK_APP_SECRET',
 ];
 
-function isValidSignature(rawBody: string, signatureHeader: string | null): boolean {
+function isValidSignature(
+  rawBody: string,
+  signatureHeader: string | null
+): boolean {
   const secrets = SECRET_ENV_NAMES
-    .map((name) => ({ name, value: (process.env[name] || '').trim().replace(/^["']|["']$/g, '') }))
+    .map((name) => ({
+      name,
+      value: (process.env[name] || '')
+        .trim()
+        .replace(/^["']|["']$/g, ''),
+    }))
     .filter((item) => item.value);
 
   if (secrets.length === 0) {
-    console.error('[WhatsApp Webhook] No app secret env found. Tried:', SECRET_ENV_NAMES.join(', '));
+    console.error(
+      '[WhatsApp Webhook] No app secret environment variable was found. Checked:',
+      SECRET_ENV_NAMES.join(', ')
+    );
     return false;
   }
+
   if (!signatureHeader) {
-    console.warn('[WhatsApp Webhook] Missing X-Hub-Signature-256 header');
+    console.warn(
+      '[WhatsApp Webhook] Missing X-Hub-Signature-256 header'
+    );
     return false;
   }
 
@@ -92,22 +110,35 @@ function isValidSignature(rawBody: string, signatureHeader: string | null): bool
 
   for (const { name, value } of secrets) {
     const expected = Buffer.from(
-      'sha256=' + crypto.createHmac('sha256', value).update(rawBody).digest('hex')
+      'sha256=' +
+        crypto.createHmac('sha256', value).update(rawBody).digest('hex')
     );
-    if (expected.length === received.length && crypto.timingSafeEqual(expected, received)) {
-      console.log('[WhatsApp Webhook] Signature OK using', name);
+
+    if (
+      expected.length === received.length &&
+      crypto.timingSafeEqual(expected, received)
+    ) {
+      console.log(
+        '[WhatsApp Webhook] Signature verification succeeded using',
+        name
+      );
       return true;
     }
   }
 
-  console.warn('[WhatsApp Webhook] Signature mismatch. Env tried:', secrets.map((item) => item.name).join(', '));
+  console.warn(
+    '[WhatsApp Webhook] Signature verification failed. Checked environment variables:',
+    secrets.map((item) => item.name).join(', ')
+  );
+
   return false;
 }
 
 /* =====================================================
    Status helpers
-   - status sirf aage badhe (sent -> delivered -> read)
-   - agar row abhi insert nahi hui (race), thoda ruk kar retry
+   - Status must only progress forward (sent -> delivered -> read).
+   - If the message row has not been inserted yet due to a race
+     condition, wait briefly and retry.
 ===================================================== */
 
 const STATUS_RANK: Record<string, number> = {
@@ -119,27 +150,35 @@ const STATUS_RANK: Record<string, number> = {
 
 function friendlyStatusError(status: any): string {
   const error = status?.errors?.[0];
+
   if (Number(error?.code) === 131047) {
-    return 'Customer ne 24 ghante me message nahi kiya. Pehle approved template message bhejein.';
+    return 'The customer has not messaged within the last 24 hours. Send an approved template message first.';
   }
+
   return String(error?.title || 'Message delivery failed');
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 async function applyStatusUpdate(userId: number, status: any) {
   const waMessageId = String(status.id);
   const statusName = String(status.status || '').toLowerCase();
+
   if (!(statusName in STATUS_RANK)) return;
 
   const statusDate = Number(status.timestamp)
     ? new Date(Number(status.timestamp) * 1000)
     : new Date();
 
-  // Webhook outbound insert se pehle aa sakta hai -> 3 baar try (1s gap)
+  // The webhook may arrive before the outbound message is inserted.
+  // Retry three times with a one-second delay between attempts.
   for (let attempt = 0; attempt < 3; attempt++) {
     const [row] = await db
-      .select({ id: whatsappMessages.id, status: whatsappMessages.status })
+      .select({
+        id: whatsappMessages.id,
+        status: whatsappMessages.status,
+      })
       .from(whatsappMessages)
       .where(
         and(
@@ -151,104 +190,129 @@ async function applyStatusUpdate(userId: number, status: any) {
 
     if (!row) {
       if (attempt < 2) {
-            await sleep(1000);
-            continue;
+        await sleep(1000);
+        continue;
       }
-      console.warn('[WhatsApp Webhook] Status for unknown message:', waMessageId, statusName);
+
+      console.warn(
+        '[WhatsApp Webhook] Status received for an unknown message:',
+        waMessageId,
+        statusName
+      );
       return;
     }
 
-    const currentRank = STATUS_RANK[String(row.status || '').toLowerCase()] ?? 0;
+    const currentRank =
+      STATUS_RANK[String(row.status || '').toLowerCase()] ?? 0;
+
     const newRank = STATUS_RANK[statusName];
 
-    // Purana/late status ignore karo (jaise read ke baad delivered)
+    // Ignore outdated status updates, such as delivered after read.
     if (statusName !== 'failed' && newRank <= currentRank) return;
-    // Already delivered/read ho chuka ho to failed se overwrite mat karo
-    if (statusName === 'failed' && currentRank >= STATUS_RANK.delivered) return;
+
+    // Do not overwrite a delivered or read status with a failed status.
+    if (
+      statusName === 'failed' &&
+      currentRank >= STATUS_RANK.delivered
+    ) {
+      return;
+    }
 
     await db
       .update(whatsappMessages)
       .set({
         status: statusName,
         ...(statusName === 'sent' ? { sentAt: statusDate } : {}),
-        ...(statusName === 'delivered' ? { deliveredAt: statusDate } : {}),
+        ...(statusName === 'delivered'
+          ? { deliveredAt: statusDate }
+          : {}),
         ...(statusName === 'read' ? { readAt: statusDate } : {}),
         ...(statusName === 'failed'
           ? { errorMessage: friendlyStatusError(status) }
           : {}),
       })
       .where(eq(whatsappMessages.id, row.id));
+
     return;
   }
 }
 
-/* =====================================================
-   Auto reply (greeting / away / keyword)
-   Customer ne abhi message kiya hai -> 24h window khuli hai -> free text allowed.
-   Sab kuch .env se badal sakte hain (defaults neeche hain).
-
-   WHATSAPP_AUTO_REPLY=off                 -> auto reply band
-   WHATSAPP_AUTO_REPLY_GREETING="..."      -> working hours me pehle message ka jawab
-   WHATSAPP_AUTO_REPLY_AWAY="..."          -> working hours ke bahar ka jawab
-   WHATSAPP_BUSINESS_START_HOUR=10         -> (24h format)
-   WHATSAPP_BUSINESS_END_HOUR=19
-   WHATSAPP_BUSINESS_DAYS=1,2,3,4,5,6      -> 0=Sun ... 6=Sat
-   WHATSAPP_BUSINESS_TZ=Asia/Kolkata
-   WHATSAPP_BUSINESS_ADDRESS="..."         -> "address" keyword ka jawab (set ho tabhi chalega)
-   WHATSAPP_AUTO_REPLY_SESSION_HOURS=24    -> greeting/away kitne ghante ke gap ke baad dobara jaye
-                                              (0 = har message par, sirf testing ke liye)
-   Placeholders: {{name}} {{business}} {{hours}} {{days}}
-===================================================== */
 
 const numEnv = (name: string, fallback: number) => {
   const raw = process.env[name];
   const value = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
   return Number.isFinite(value) ? value : fallback;
 };
+
 const textEnv = (name: string, fallback: string) =>
   (process.env[name] || fallback).replace(/\\n/g, '\n');
 
-const AUTO_REPLY_ENABLED = (process.env.WHATSAPP_AUTO_REPLY || 'on').trim().toLowerCase() !== 'off';
-const BUSINESS_TZ = process.env.WHATSAPP_BUSINESS_TZ || 'Asia/Kolkata';
-const SESSION_HOURS = numEnv('WHATSAPP_AUTO_REPLY_SESSION_HOURS', 24);
-const BUSINESS_START_HOUR = numEnv('WHATSAPP_BUSINESS_START_HOUR', 10);
-const BUSINESS_END_HOUR = numEnv('WHATSAPP_BUSINESS_END_HOUR', 19);
-const BUSINESS_DAYS = (process.env.WHATSAPP_BUSINESS_DAYS || '1,2,3,4,5,6')
+const AUTO_REPLY_ENABLED =
+  (process.env.WHATSAPP_AUTO_REPLY || 'on').trim().toLowerCase() !== 'off';
+
+const BUSINESS_TZ =
+  process.env.WHATSAPP_BUSINESS_TZ || 'Asia/Kolkata';
+
+const SESSION_HOURS = numEnv(
+  'WHATSAPP_AUTO_REPLY_SESSION_HOURS',
+  24
+);
+
+const BUSINESS_START_HOUR = numEnv(
+  'WHATSAPP_BUSINESS_START_HOUR',
+  10
+);
+
+const BUSINESS_END_HOUR = numEnv(
+  'WHATSAPP_BUSINESS_END_HOUR',
+  19
+);
+
+const BUSINESS_DAYS = (
+  process.env.WHATSAPP_BUSINESS_DAYS || '1,2,3,4,5,6'
+)
   .split(',')
   .map((item) => Number(item.trim()))
   .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6);
 
 const GREETING_TEXT = textEnv(
   'WHATSAPP_AUTO_REPLY_GREETING',
-  'Namaste {{name}}! 🙏\n{{business}} mein aapka swagat hai. Apna sawal yahan likh dein, hum jaldi aapse sampark karenge.\n\nMenu ke liye "menu" likhein.'
+  'Hello {{name}}! 👋\nWelcome to {{business}}. Please send us your question, and our team will get back to you shortly.\n\nType "menu" to see the available options.'
 );
+
 const AWAY_TEXT = textEnv(
   'WHATSAPP_AUTO_REPLY_AWAY',
-  'Namaste {{name}}! 🙏\nAbhi hamara office band hai. Hum {{days}}, {{hours}} ke beech uplabdh hain.\nAapka message hamein mil gaya hai, hum working hours me jawab denge.'
+  'Hello {{name}}! 👋\nOur office is currently closed. Our business hours are {{hours}}, {{days}}.\nWe have received your message and will respond during business hours.'
 );
 
 const KEYWORD_REPLIES: { keywords: string[]; reply: string }[] = [
   {
     keywords: ['menu', 'help', 'options'],
     reply:
-      'Aap yeh likh sakte hain:\n• *price* - rate / fees\n• *time* - working hours\n' +
-      (process.env.WHATSAPP_BUSINESS_ADDRESS ? '• *address* - hamara pata\n' : '') +
-      '\nYa seedha apna sawal likh dein.',
+      'You can type one of the following:\n' +
+      '• *price* - View our pricing or fees\n' +
+      '• *time* - View our business hours\n' +
+      (process.env.WHATSAPP_BUSINESS_ADDRESS
+        ? '• *address* - View our business address\n'
+        : '') +
+      '\nOr simply type your question, and our team will assist you.',
   },
   {
     keywords: ['price', 'rate', 'fees', 'charges', 'cost'],
     reply:
-      'Rate/fees aapki requirement par depend karta hai. Apni requirement likh dein, hum details bhej denge.',
+      'Our pricing depends on your specific requirements. Please share more details about what you need, and we will provide the relevant pricing information.',
   },
   {
     keywords: ['time', 'timing', 'timings', 'hours', 'open'],
-    reply: 'Hum {{days}}, {{hours}} ke beech uplabdh hain.',
+    reply: 'Our business hours are {{days}}, {{hours}}.',
   },
   ...(process.env.WHATSAPP_BUSINESS_ADDRESS
     ? [
         {
-          keywords: ['address', 'location', 'pata'],
-          reply: 'Hamara address: ' + process.env.WHATSAPP_BUSINESS_ADDRESS,
+          keywords: ['address', 'location'],
+          reply:
+            'Our business address is: ' +
+            process.env.WHATSAPP_BUSINESS_ADDRESS,
         },
       ]
     : []),
@@ -262,12 +326,18 @@ const formatHour = (hour: number) => {
   return `${display}:00 ${suffix}`;
 };
 
-const hoursLabel = () => `${formatHour(BUSINESS_START_HOUR)} - ${formatHour(BUSINESS_END_HOUR)}`;
+const hoursLabel = () =>
+  `${formatHour(BUSINESS_START_HOUR)} - ${formatHour(BUSINESS_END_HOUR)}`;
 
 function daysLabel(): string {
   const days = [...BUSINESS_DAYS].sort((a, b) => a - b);
+
   if (days.length === 0) return '';
-  const contiguous = days.every((day, index) => index === 0 || day === days[index - 1] + 1);
+
+  const contiguous = days.every(
+    (day, index) => index === 0 || day === days[index - 1] + 1
+  );
+
   return contiguous && days.length > 1
     ? `${DAY_NAMES[days[0]]}-${DAY_NAMES[days[days.length - 1]]}`
     : days.map((day) => DAY_NAMES[day]).join(', ');
@@ -282,8 +352,13 @@ function isBusinessOpen(): boolean {
       hourCycle: 'h23',
     }).formatToParts(new Date());
 
-    const weekday = DAY_NAMES.indexOf(parts.find((part) => part.type === 'weekday')?.value || '');
-    const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+    const weekday = DAY_NAMES.indexOf(
+      parts.find((part) => part.type === 'weekday')?.value || ''
+    );
+
+    const hour = Number(
+      parts.find((part) => part.type === 'hour')?.value
+    );
 
     return (
       BUSINESS_DAYS.includes(weekday) &&
@@ -292,7 +367,7 @@ function isBusinessOpen(): boolean {
       hour < BUSINESS_END_HOUR
     );
   } catch {
-    return true; // time nikalne me dikkat ho to greeting hi bhejo
+    return true; // Default to greeting behavior if timezone processing fails.
   }
 }
 
@@ -301,16 +376,28 @@ function findKeywordReply(text: string): string | null {
     .toLowerCase()
     .split(/[^a-z0-9ऀ-ॿ]+/)
     .filter(Boolean);
-  // Lambe sentence ka jawab insaan dega, keyword reply sirf chhote message par
+
+  // Let a human handle long messages. Keyword replies are intended
+  // only for short messages.
   if (words.length === 0 || words.length > 6) return null;
+
   for (const item of KEYWORD_REPLIES) {
-    if (item.keywords.some((keyword) => words.includes(keyword))) return item.reply;
+    if (item.keywords.some((keyword) => words.includes(keyword))) {
+      return item.reply;
+    }
   }
+
   return null;
 }
 
-const renderTemplate = (template: string, vars: Record<string, string>) =>
-  template.replace(/\{\{(\w+)\}\}/g, (_match, key: string) => vars[key] ?? '');
+const renderTemplate = (
+  template: string,
+  vars: Record<string, string>
+) =>
+  template.replace(
+    /\{\{(\w+)\}\}/g,
+    (_match, key: string) => vars[key] ?? ''
+  );
 
 async function maybeAutoReply(params: {
   userId: number;
@@ -325,30 +412,44 @@ async function maybeAutoReply(params: {
   isNewSession: boolean;
 }) {
   if (!AUTO_REPLY_ENABLED) {
-    console.log('[WhatsApp Webhook] Auto reply skipped: WHATSAPP_AUTO_REPLY=off');
+    console.log(
+      '[WhatsApp Webhook] Automatic reply skipped: automatic replies are disabled'
+    );
     return;
   }
+
   if (!params.connection.accessToken) {
-    console.log('[WhatsApp Webhook] Auto reply skipped: access token missing');
+    console.log(
+      '[WhatsApp Webhook] Automatic reply skipped: access token is missing'
+    );
     return;
   }
-  if (params.ownNumber && params.to === params.ownNumber) return; // apne hi number ko reply nahi
-  if (['reaction', 'system', 'unsupported'].includes(params.messageType)) return;
+
+  // Do not reply to our own business number.
+  if (params.ownNumber && params.to === params.ownNumber) return;
+
+  if (['reaction', 'system', 'unsupported'].includes(params.messageType)) {
+    return;
+  }
 
   let reply = findKeywordReply(params.text);
   let kind = 'keyword';
+
   if (!reply && params.isNewSession) {
     const open = isBusinessOpen();
     reply = open ? GREETING_TEXT : AWAY_TEXT;
     kind = open ? 'greeting' : 'away';
   }
+
   if (!reply) {
-    console.log('[WhatsApp Webhook] Auto reply skipped: no keyword match and not a new session');
+    console.log(
+      '[WhatsApp Webhook] Automatic reply skipped: no keyword matched and this is not a new session'
+    );
     return;
   }
 
   const body = renderTemplate(reply, {
-    name: params.customerName || 'ji',
+    name: params.customerName || 'there',
     business: params.businessName,
     hours: hoursLabel(),
     days: daysLabel(),
@@ -362,17 +463,18 @@ async function maybeAutoReply(params: {
       to: params.to,
       text: body,
     });
-    console.log('[WhatsApp Webhook] Auto reply sent:', kind);
+
+    console.log('[WhatsApp Webhook] Automatic reply sent:', kind);
   } catch (error) {
     console.error(
-      '[WhatsApp Webhook] Auto reply failed:',
+      '[WhatsApp Webhook] Automatic reply failed:',
       error instanceof Error ? error.message : error
     );
   }
 }
 
 /* =====================================================
-   POST — incoming events
+   POST — Incoming webhook events
 ===================================================== */
 
 export async function POST(request: NextRequest) {
@@ -381,19 +483,33 @@ export async function POST(request: NextRequest) {
     const signature = request.headers.get('x-hub-signature-256');
 
     if (!isValidSignature(rawBody, signature)) {
-      console.warn('[WhatsApp Webhook] Invalid signature, rejecting');
-      return NextResponse.json({ success: false, message: 'Invalid signature' }, { status: 401 });
+      console.warn(
+        '[WhatsApp Webhook] Invalid signature. Rejecting the request.'
+      );
+
+      return NextResponse.json(
+        { success: false, message: 'Invalid signature' },
+        { status: 401 }
+      );
     }
 
     const body = JSON.parse(rawBody);
 
     if (body.object !== 'whatsapp_business_account') {
-      console.warn('[WhatsApp Webhook] Unknown object:', body.object);
-      return NextResponse.json({ success: false, message: 'Unknown webhook object' }, { status: 400 });
+      console.warn('[WhatsApp Webhook] Unknown webhook object:', body.object);
+
+      return NextResponse.json(
+        { success: false, message: 'Unknown webhook object' },
+        { status: 400 }
+      );
     }
-    console.log('[WhatsApp Webhook] Accepted business-account event:', {
-      entryCount: Array.isArray(body.entry) ? body.entry.length : 0,
-    });
+
+    console.log(
+      '[WhatsApp Webhook] Accepted business-account event:',
+      {
+        entryCount: Array.isArray(body.entry) ? body.entry.length : 0,
+      }
+    );
 
     for (const entry of body.entry || []) {
       const wabaId: string | undefined = entry.id;
@@ -408,7 +524,8 @@ export async function POST(request: NextRequest) {
           field === 'business_status_update' ||
           field === 'account_review_update'
         ) {
-          const phoneNumberId: string | undefined = value?.phone_number_id;
+          const phoneNumberId: string | undefined =
+            value?.phone_number_id;
 
           console.log('[WhatsApp Webhook] Account event:', {
             field,
@@ -421,8 +538,11 @@ export async function POST(request: NextRequest) {
             try {
               const businessPhoneNumber: string | undefined =
                 value?.display_phone_number || value?.phone_number;
+
               const businessName: string | undefined =
-                value?.verified_name || value?.business_name || value?.name;
+                value?.verified_name ||
+                value?.business_name ||
+                value?.name;
 
               const updateResult = await db
                 .update(whatsappConnections)
@@ -437,29 +557,39 @@ export async function POST(request: NextRequest) {
 
               const affectedRows =
                 Array.isArray(updateResult) && updateResult[0]
-                  ? (updateResult[0] as { affectedRows?: number }).affectedRows
+                  ? (
+                      updateResult[0] as {
+                        affectedRows?: number;
+                      }
+                    ).affectedRows
                   : undefined;
 
               if (!affectedRows) {
                 console.warn(
-                  '[WhatsApp Webhook] No existing row for WABA ID yet (claim will create it):',
+                  '[WhatsApp Webhook] No existing connection was found for this WABA ID. The connection may be created during account claiming:',
                   wabaId
                 );
               }
             } catch (dbError) {
-              console.error('[WhatsApp Webhook] DB update failed:', dbError);
+              console.error(
+                '[WhatsApp Webhook] Database update failed:',
+                dbError
+              );
             }
           } else {
-            console.warn('[WhatsApp Webhook] Account event missing WABA ID');
+            console.warn(
+              '[WhatsApp Webhook] Account event is missing the WABA ID'
+            );
           }
         }
 
-        /* Messages / statuses */
+        /* Messages and status updates */
         if (field === 'messages') {
           const phoneNumberId = value?.metadata?.phone_number_id;
-          const displayPhoneNumber = value?.metadata?.display_phone_number;
+          const displayPhoneNumber =
+            value?.metadata?.display_phone_number;
 
-          console.log('[WhatsApp Webhook] Messages for:', {
+          console.log('[WhatsApp Webhook] Messages received for:', {
             phoneNumberId,
             displayPhoneNumber,
             incoming: (value?.messages || []).length,
@@ -476,7 +606,10 @@ export async function POST(request: NextRequest) {
                 .from(whatsappConnections)
                 .where(
                   and(
-                    eq(whatsappConnections.phoneNumberId, String(phoneNumberId)),
+                    eq(
+                      whatsappConnections.phoneNumberId,
+                      String(phoneNumberId)
+                    ),
                     eq(whatsappConnections.status, 'active')
                   )
                 )
@@ -485,7 +618,7 @@ export async function POST(request: NextRequest) {
 
           if (!connection) {
             console.warn(
-              '[WhatsApp Webhook] No active account matches incoming phone number ID:',
+              '[WhatsApp Webhook] No active account matches the incoming phone number ID:',
               phoneNumberId
             );
           }
@@ -496,8 +629,11 @@ export async function POST(request: NextRequest) {
 
             const waMessageId = String(message?.id || '').trim();
             const sender = String(message?.from || '').replace(/\D/g, '');
+
             if (!waMessageId || !sender) {
-              console.warn('[WhatsApp Webhook] Ignoring message without id or sender');
+              console.warn(
+                '[WhatsApp Webhook] Ignoring a message without an ID or sender'
+              );
               continue;
             }
 
@@ -511,12 +647,16 @@ export async function POST(request: NextRequest) {
                 )
               )
               .limit(1);
+
             if (alreadyStored) continue;
 
             const contactInfo = (value?.contacts || []).find(
-              (item: any) => String(item?.wa_id || '').replace(/\D/g, '') === sender
+              (item: any) =>
+                String(item?.wa_id || '').replace(/\D/g, '') === sender
             );
-            const profileName = String(contactInfo?.profile?.name || '').trim() || null;
+
+            const profileName =
+              String(contactInfo?.profile?.name || '').trim() || null;
 
             const [existingContact] = await db
               .select({
@@ -533,11 +673,14 @@ export async function POST(request: NextRequest) {
               .limit(1);
 
             let contactId = existingContact?.id;
+
             if (existingContact) {
               await db
                 .update(whatsappContacts)
                 .set({
-                  ...(profileName && !existingContact.profileName ? { profileName } : {}),
+                  ...(profileName && !existingContact.profileName
+                    ? { profileName }
+                    : {}),
                   waId: sender,
                   lastSeenAt: new Date(),
                   updatedAt: new Date(),
@@ -562,15 +705,21 @@ export async function POST(request: NextRequest) {
                   metadata: { source: 'whatsapp_webhook' },
                 })
                 .$returningId();
+
               contactId = createdContact?.id;
             }
 
             if (!contactId) {
-              console.error('[WhatsApp Webhook] Failed to resolve contact for incoming message');
+              console.error(
+                '[WhatsApp Webhook] Failed to resolve the contact for the incoming message'
+              );
               continue;
             }
 
-            const messageType = String(message?.type || 'unknown').slice(0, 50);
+            const messageType = String(
+              message?.type || 'unknown'
+            ).slice(0, 50);
+
             const text =
               messageType === 'text'
                 ? String(message?.text?.body || '')
@@ -581,8 +730,13 @@ export async function POST(request: NextRequest) {
                       message?.button?.text ||
                       ''
                   );
-            const mediaId = message?.[messageType]?.id ? String(message[messageType].id) : null;
+
+            const mediaId = message?.[messageType]?.id
+              ? String(message[messageType].id)
+              : null;
+
             const timestampSeconds = Number(message?.timestamp);
+
             const messageDate =
               Number.isFinite(timestampSeconds) && timestampSeconds > 0
                 ? new Date(timestampSeconds * 1000)
@@ -600,6 +754,7 @@ export async function POST(request: NextRequest) {
               .limit(1);
 
             let conversationId = existingConversation?.id;
+
             if (existingConversation) {
               await db
                 .update(whatsappConversations)
@@ -612,7 +767,10 @@ export async function POST(request: NextRequest) {
                 })
                 .where(
                   and(
-                    eq(whatsappConversations.id, existingConversation.id),
+                    eq(
+                      whatsappConversations.id,
+                      existingConversation.id
+                    ),
                     eq(whatsappConversations.userId, connection.userId)
                   )
                 );
@@ -631,29 +789,41 @@ export async function POST(request: NextRequest) {
                   updatedAt: new Date(),
                 })
                 .$returningId();
+
               conversationId = createdConversation?.id;
             }
 
             if (!conversationId) {
-              console.error('[WhatsApp Webhook] Failed to resolve conversation for incoming message');
+              console.error(
+                '[WhatsApp Webhook] Failed to resolve the conversation for the incoming message'
+              );
               continue;
             }
 
-            // Naya session? (is conversation me pichhla incoming message 24h se purana ya hai hi nahi)
+            // A new session begins when there is no previous inbound
+            // message or the previous inbound message is older than
+            // the configured session interval.
             const [lastInbound] = await db
-              .select({ createdAt: whatsappMessages.createdAt })
+              .select({
+                createdAt: whatsappMessages.createdAt,
+              })
               .from(whatsappMessages)
               .where(
                 and(
-                  eq(whatsappMessages.conversationId, conversationId),
+                  eq(
+                    whatsappMessages.conversationId,
+                    conversationId
+                  ),
                   eq(whatsappMessages.direction, 'inbound')
                 )
               )
               .orderBy(desc(whatsappMessages.createdAt))
               .limit(1);
+
             const isNewSession =
               !lastInbound ||
-              messageDate.getTime() - new Date(lastInbound.createdAt as any).getTime() >
+              messageDate.getTime() -
+                new Date(lastInbound.createdAt as any).getTime() >
                 SESSION_HOURS * 60 * 60 * 1000;
 
             await db.insert(whatsappMessages).values({
@@ -667,11 +837,15 @@ export async function POST(request: NextRequest) {
               createdAt: messageDate,
               metadata: {
                 ...(mediaId ? { mediaId } : {}),
-                ...(message?.context?.id ? { contextMessageId: String(message.context.id) } : {}),
+                ...(message?.context?.id
+                  ? {
+                      contextMessageId: String(message.context.id),
+                    }
+                  : {}),
               },
             });
 
-            // Auto reply (greeting / away / keyword)
+            // Send an automatic greeting, away message, or keyword reply.
             await maybeAutoReply({
               userId: connection.userId,
               conversationId,
@@ -679,10 +853,15 @@ export async function POST(request: NextRequest) {
                 phoneNumberId: String(phoneNumberId),
                 accessToken: String(connection.accessToken || ''),
               },
-              businessName: connection.businessName || 'hamare business',
+              businessName:
+                connection.businessName || 'our business',
               to: sender,
-              ownNumber: String(displayPhoneNumber || '').replace(/\D/g, ''),
-              customerName: profileName ?? existingContact?.profileName ?? null,
+              ownNumber: String(displayPhoneNumber || '').replace(
+                /\D/g,
+                ''
+              ),
+              customerName:
+                profileName ?? existingContact?.profileName ?? null,
               messageType,
               text,
               isNewSession,
@@ -692,12 +871,20 @@ export async function POST(request: NextRequest) {
           /* ---------- Status updates (sent / delivered / read / failed) ---------- */
           if (connection) {
             const userId = connection.userId;
-            const validStatuses = (value?.statuses || []).filter((s: any) => s?.id);
-            // Parallel, taaki retry-wait ek hi baar lage
+
+            const validStatuses = (value?.statuses || []).filter(
+              (status: any) => status?.id
+            );
+
+            // Process statuses in parallel so retry delays do not block
+            // other status updates.
             await Promise.all(
-              validStatuses.map((s: any) =>
-                applyStatusUpdate(userId, s).catch((err) =>
-                  console.error('[WhatsApp Webhook] Status update failed:', err)
+              validStatuses.map((status: any) =>
+                applyStatusUpdate(userId, status).catch((err) =>
+                  console.error(
+                    '[WhatsApp Webhook] Status update failed:',
+                    err
+                  )
                 )
               )
             );
@@ -708,9 +895,13 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
-    console.error('[WhatsApp Webhook] POST error:', error);
+    console.error('[WhatsApp Webhook] POST request failed:', error);
+
     return NextResponse.json(
-      { success: false, error: 'Webhook processing failed' },
+      {
+        success: false,
+        error: 'Webhook processing failed',
+      },
       { status: 500 }
     );
   }
