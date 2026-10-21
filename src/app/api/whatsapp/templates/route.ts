@@ -67,15 +67,32 @@ export async function GET(request: NextRequest) {
     });
 
     const result = await response.json();
-    console.log('[WA templates diagnostic]', {
-      wabaId: connection.wabaId,
-      httpStatus: response.status,
-      count: Array.isArray(result.data)
-        ? result.data.length
-        : null,
-      metaError: result.error?.message ?? null,
-      paging: result.paging ?? null,
-    });
+  console.log('[WA templates diagnostic]', {
+  wabaId: connection.wabaId,
+  httpStatus: response.status,
+  responseKeys: Object.keys(result ?? {}),
+  count: Array.isArray(result.data)
+    ? result.data.length
+    : null,
+  templates: Array.isArray(result.data)
+    ? result.data.map((item: {
+        id?: string;
+        name?: string;
+        status?: string;
+        category?: string;
+        language?: string;
+      }) => ({
+        id: item.id,
+        name: item.name,
+        status: item.status,
+        category: item.category,
+        language: item.language,
+      }))
+    : null,
+  metaError: result.error?.message ?? null,
+  metaErrorCode: result.error?.code ?? null,
+  paging: result.paging ?? null,
+});
     if (!response.ok) {
       console.error(
         '[WhatsApp Templates] Meta API error:',
