@@ -195,6 +195,8 @@ async function applyStatusUpdate(userId: number, status: any) {
    WHATSAPP_BUSINESS_DAYS=1,2,3,4,5,6      -> 0=Sun ... 6=Sat
    WHATSAPP_BUSINESS_TZ=Asia/Kolkata
    WHATSAPP_BUSINESS_ADDRESS="..."         -> "address" keyword ka jawab (set ho tabhi chalega)
+   WHATSAPP_AUTO_REPLY_SESSION_HOURS=24    -> greeting/away kitne ghante ke gap ke baad dobara jaye
+                                              (0 = har message par, sirf testing ke liye)
    Placeholders: {{name}} {{business}} {{hours}} {{days}}
 ===================================================== */
 
@@ -208,6 +210,7 @@ const textEnv = (name: string, fallback: string) =>
 
 const AUTO_REPLY_ENABLED = (process.env.WHATSAPP_AUTO_REPLY || 'on').trim().toLowerCase() !== 'off';
 const BUSINESS_TZ = process.env.WHATSAPP_BUSINESS_TZ || 'Asia/Kolkata';
+const SESSION_HOURS = numEnv('WHATSAPP_AUTO_REPLY_SESSION_HOURS', 24);
 const BUSINESS_START_HOUR = numEnv('WHATSAPP_BUSINESS_START_HOUR', 10);
 const BUSINESS_END_HOUR = numEnv('WHATSAPP_BUSINESS_END_HOUR', 19);
 const BUSINESS_DAYS = (process.env.WHATSAPP_BUSINESS_DAYS || '1,2,3,4,5,6')
@@ -321,8 +324,14 @@ async function maybeAutoReply(params: {
   text: string;
   isNewSession: boolean;
 }) {
-  if (!AUTO_REPLY_ENABLED) return;
-  if (!params.connection.accessToken) return;
+  if (!AUTO_REPLY_ENABLED) {
+    console.log('[WhatsApp Webhook] Auto reply skipped: WHATSAPP_AUTO_REPLY=off');
+    return;
+  }
+  if (!params.connection.accessToken) {
+    console.log('[WhatsApp Webhook] Auto reply skipped: access token missing');
+    return;
+  }
   if (params.ownNumber && params.to === params.ownNumber) return; // apne hi number ko reply nahi
   if (['reaction', 'system', 'unsupported'].includes(params.messageType)) return;
 
@@ -333,7 +342,10 @@ async function maybeAutoReply(params: {
     reply = open ? GREETING_TEXT : AWAY_TEXT;
     kind = open ? 'greeting' : 'away';
   }
-  if (!reply) return;
+  if (!reply) {
+    console.log('[WhatsApp Webhook] Auto reply skipped: no keyword match and not a new session');
+    return;
+  }
 
   const body = renderTemplate(reply, {
     name: params.customerName || 'ji',
@@ -642,7 +654,7 @@ export async function POST(request: NextRequest) {
             const isNewSession =
               !lastInbound ||
               messageDate.getTime() - new Date(lastInbound.createdAt as any).getTime() >
-                24 * 60 * 60 * 1000;
+                SESSION_HOURS * 60 * 60 * 1000;
 
             await db.insert(whatsappMessages).values({
               conversationId,
