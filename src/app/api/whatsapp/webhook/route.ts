@@ -3,7 +3,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 
 import { db } from '@/db';
 import {
@@ -12,6 +12,7 @@ import {
   whatsappConversations,
   whatsappMessages,
 } from '@/db/schema';
+import { sendOutbound, type ActiveConnection } from '@/lib/whatsapp-send';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -73,10 +74,6 @@ const SECRET_ENV_NAMES = [
   'FACEBOOK_APP_SECRET',
 ];
 
-// Safe fingerprint (secret nahi dikhta) - sirf compare karne ke liye
-const fingerprint = (value: string) =>
-  crypto.createHash('sha256').update(value).digest('hex').slice(0, 8);
-
 function isValidSignature(rawBody: string, signatureHeader: string | null): boolean {
   const secrets = SECRET_ENV_NAMES
     .map((name) => ({ name, value: (process.env[name] || '').trim().replace(/^["']|["']$/g, '') }))
@@ -103,16 +100,7 @@ function isValidSignature(rawBody: string, signatureHeader: string | null): bool
     }
   }
 
-  // TEMPORARY DEBUG: kaam hone ke baad hata dein
-  console.warn('[WhatsApp Webhook] Signature mismatch. Debug:', {
-    bodyLength: rawBody.length,
-    headerPrefix: signatureHeader.slice(0, 14),
-    tried: secrets.map((item) => ({
-      env: item.name,
-      length: item.value.length,
-      fingerprint: fingerprint(item.value),
-    })),
-  });
+  console.warn('[WhatsApp Webhook] Signature mismatch. Env tried:', secrets.map((item) => item.name).join(', '));
   return false;
 }
 
@@ -128,6 +116,14 @@ const STATUS_RANK: Record<string, number> = {
   delivered: 2,
   read: 3,
 };
+
+function friendlyStatusError(status: any): string {
+  const error = status?.errors?.[0];
+  if (Number(error?.code) === 131047) {
+    return 'Customer ne 24 ghante me message nahi kiya. Pehle approved template message bhejein.';
+  }
+  return String(error?.title || 'Message delivery failed');
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -178,11 +174,188 @@ async function applyStatusUpdate(userId: number, status: any) {
         ...(statusName === 'delivered' ? { deliveredAt: statusDate } : {}),
         ...(statusName === 'read' ? { readAt: statusDate } : {}),
         ...(statusName === 'failed'
-          ? { errorMessage: String(status?.errors?.[0]?.title || 'Message delivery failed') }
+          ? { errorMessage: friendlyStatusError(status) }
           : {}),
       })
       .where(eq(whatsappMessages.id, row.id));
     return;
+  }
+}
+
+/* =====================================================
+   Auto reply (greeting / away / keyword)
+   Customer ne abhi message kiya hai -> 24h window khuli hai -> free text allowed.
+   Sab kuch .env se badal sakte hain (defaults neeche hain).
+
+   WHATSAPP_AUTO_REPLY=off                 -> auto reply band
+   WHATSAPP_AUTO_REPLY_GREETING="..."      -> working hours me pehle message ka jawab
+   WHATSAPP_AUTO_REPLY_AWAY="..."          -> working hours ke bahar ka jawab
+   WHATSAPP_BUSINESS_START_HOUR=10         -> (24h format)
+   WHATSAPP_BUSINESS_END_HOUR=19
+   WHATSAPP_BUSINESS_DAYS=1,2,3,4,5,6      -> 0=Sun ... 6=Sat
+   WHATSAPP_BUSINESS_TZ=Asia/Kolkata
+   WHATSAPP_BUSINESS_ADDRESS="..."         -> "address" keyword ka jawab (set ho tabhi chalega)
+   Placeholders: {{name}} {{business}} {{hours}} {{days}}
+===================================================== */
+
+const numEnv = (name: string, fallback: number) => {
+  const raw = process.env[name];
+  const value = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+};
+const textEnv = (name: string, fallback: string) =>
+  (process.env[name] || fallback).replace(/\\n/g, '\n');
+
+const AUTO_REPLY_ENABLED = (process.env.WHATSAPP_AUTO_REPLY || 'on').trim().toLowerCase() !== 'off';
+const BUSINESS_TZ = process.env.WHATSAPP_BUSINESS_TZ || 'Asia/Kolkata';
+const BUSINESS_START_HOUR = numEnv('WHATSAPP_BUSINESS_START_HOUR', 10);
+const BUSINESS_END_HOUR = numEnv('WHATSAPP_BUSINESS_END_HOUR', 19);
+const BUSINESS_DAYS = (process.env.WHATSAPP_BUSINESS_DAYS || '1,2,3,4,5,6')
+  .split(',')
+  .map((item) => Number(item.trim()))
+  .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6);
+
+const GREETING_TEXT = textEnv(
+  'WHATSAPP_AUTO_REPLY_GREETING',
+  'Namaste {{name}}! 🙏\n{{business}} mein aapka swagat hai. Apna sawal yahan likh dein, hum jaldi aapse sampark karenge.\n\nMenu ke liye "menu" likhein.'
+);
+const AWAY_TEXT = textEnv(
+  'WHATSAPP_AUTO_REPLY_AWAY',
+  'Namaste {{name}}! 🙏\nAbhi hamara office band hai. Hum {{days}}, {{hours}} ke beech uplabdh hain.\nAapka message hamein mil gaya hai, hum working hours me jawab denge.'
+);
+
+const KEYWORD_REPLIES: { keywords: string[]; reply: string }[] = [
+  {
+    keywords: ['menu', 'help', 'options'],
+    reply:
+      'Aap yeh likh sakte hain:\n• *price* - rate / fees\n• *time* - working hours\n' +
+      (process.env.WHATSAPP_BUSINESS_ADDRESS ? '• *address* - hamara pata\n' : '') +
+      '\nYa seedha apna sawal likh dein.',
+  },
+  {
+    keywords: ['price', 'rate', 'fees', 'charges', 'cost'],
+    reply:
+      'Rate/fees aapki requirement par depend karta hai. Apni requirement likh dein, hum details bhej denge.',
+  },
+  {
+    keywords: ['time', 'timing', 'timings', 'hours', 'open'],
+    reply: 'Hum {{days}}, {{hours}} ke beech uplabdh hain.',
+  },
+  ...(process.env.WHATSAPP_BUSINESS_ADDRESS
+    ? [
+        {
+          keywords: ['address', 'location', 'pata'],
+          reply: 'Hamara address: ' + process.env.WHATSAPP_BUSINESS_ADDRESS,
+        },
+      ]
+    : []),
+];
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+const formatHour = (hour: number) => {
+  const suffix = hour >= 12 && hour < 24 ? 'PM' : 'AM';
+  const display = hour % 12 === 0 ? 12 : hour % 12;
+  return `${display}:00 ${suffix}`;
+};
+
+const hoursLabel = () => `${formatHour(BUSINESS_START_HOUR)} - ${formatHour(BUSINESS_END_HOUR)}`;
+
+function daysLabel(): string {
+  const days = [...BUSINESS_DAYS].sort((a, b) => a - b);
+  if (days.length === 0) return '';
+  const contiguous = days.every((day, index) => index === 0 || day === days[index - 1] + 1);
+  return contiguous && days.length > 1
+    ? `${DAY_NAMES[days[0]]}-${DAY_NAMES[days[days.length - 1]]}`
+    : days.map((day) => DAY_NAMES[day]).join(', ');
+}
+
+function isBusinessOpen(): boolean {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: BUSINESS_TZ,
+      weekday: 'short',
+      hour: 'numeric',
+      hourCycle: 'h23',
+    }).formatToParts(new Date());
+
+    const weekday = DAY_NAMES.indexOf(parts.find((part) => part.type === 'weekday')?.value || '');
+    const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+
+    return (
+      BUSINESS_DAYS.includes(weekday) &&
+      Number.isFinite(hour) &&
+      hour >= BUSINESS_START_HOUR &&
+      hour < BUSINESS_END_HOUR
+    );
+  } catch {
+    return true; // time nikalne me dikkat ho to greeting hi bhejo
+  }
+}
+
+function findKeywordReply(text: string): string | null {
+  const words = text
+    .toLowerCase()
+    .split(/[^a-z0-9ऀ-ॿ]+/)
+    .filter(Boolean);
+  // Lambe sentence ka jawab insaan dega, keyword reply sirf chhote message par
+  if (words.length === 0 || words.length > 6) return null;
+  for (const item of KEYWORD_REPLIES) {
+    if (item.keywords.some((keyword) => words.includes(keyword))) return item.reply;
+  }
+  return null;
+}
+
+const renderTemplate = (template: string, vars: Record<string, string>) =>
+  template.replace(/\{\{(\w+)\}\}/g, (_match, key: string) => vars[key] ?? '');
+
+async function maybeAutoReply(params: {
+  userId: number;
+  conversationId: number;
+  connection: ActiveConnection;
+  businessName: string;
+  to: string;
+  ownNumber: string;
+  customerName: string | null;
+  messageType: string;
+  text: string;
+  isNewSession: boolean;
+}) {
+  if (!AUTO_REPLY_ENABLED) return;
+  if (!params.connection.accessToken) return;
+  if (params.ownNumber && params.to === params.ownNumber) return; // apne hi number ko reply nahi
+  if (['reaction', 'system', 'unsupported'].includes(params.messageType)) return;
+
+  let reply = findKeywordReply(params.text);
+  let kind = 'keyword';
+  if (!reply && params.isNewSession) {
+    const open = isBusinessOpen();
+    reply = open ? GREETING_TEXT : AWAY_TEXT;
+    kind = open ? 'greeting' : 'away';
+  }
+  if (!reply) return;
+
+  const body = renderTemplate(reply, {
+    name: params.customerName || 'ji',
+    business: params.businessName,
+    hours: hoursLabel(),
+    days: daysLabel(),
+  }).trim();
+
+  try {
+    await sendOutbound({
+      userId: params.userId,
+      conversationId: params.conversationId,
+      connection: params.connection,
+      to: params.to,
+      text: body,
+    });
+    console.log('[WhatsApp Webhook] Auto reply sent:', kind);
+  } catch (error) {
+    console.error(
+      '[WhatsApp Webhook] Auto reply failed:',
+      error instanceof Error ? error.message : error
+    );
   }
 }
 
@@ -283,7 +456,11 @@ export async function POST(request: NextRequest) {
 
           const [connection] = phoneNumberId
             ? await db
-                .select({ userId: whatsappConnections.userId })
+                .select({
+                  userId: whatsappConnections.userId,
+                  accessToken: whatsappConnections.accessToken,
+                  businessName: whatsappConnections.businessName,
+                })
                 .from(whatsappConnections)
                 .where(
                   and(
@@ -450,6 +627,23 @@ export async function POST(request: NextRequest) {
               continue;
             }
 
+            // Naya session? (is conversation me pichhla incoming message 24h se purana ya hai hi nahi)
+            const [lastInbound] = await db
+              .select({ createdAt: whatsappMessages.createdAt })
+              .from(whatsappMessages)
+              .where(
+                and(
+                  eq(whatsappMessages.conversationId, conversationId),
+                  eq(whatsappMessages.direction, 'inbound')
+                )
+              )
+              .orderBy(desc(whatsappMessages.createdAt))
+              .limit(1);
+            const isNewSession =
+              !lastInbound ||
+              messageDate.getTime() - new Date(lastInbound.createdAt as any).getTime() >
+                24 * 60 * 60 * 1000;
+
             await db.insert(whatsappMessages).values({
               conversationId,
               userId: connection.userId,
@@ -463,6 +657,23 @@ export async function POST(request: NextRequest) {
                 ...(mediaId ? { mediaId } : {}),
                 ...(message?.context?.id ? { contextMessageId: String(message.context.id) } : {}),
               },
+            });
+
+            // Auto reply (greeting / away / keyword)
+            await maybeAutoReply({
+              userId: connection.userId,
+              conversationId,
+              connection: {
+                phoneNumberId: String(phoneNumberId),
+                accessToken: String(connection.accessToken || ''),
+              },
+              businessName: connection.businessName || 'hamare business',
+              to: sender,
+              ownNumber: String(displayPhoneNumber || '').replace(/\D/g, ''),
+              customerName: profileName ?? existingContact?.profileName ?? null,
+              messageType,
+              text,
+              isNewSession,
             });
           }
 
