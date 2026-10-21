@@ -44,6 +44,13 @@ const DEBUG_APP_SECRET =
 
 const BATCH_SIZE = 100;
 
+// Optional: comma-separated Meta business user IDs that are given full control of
+// every catalog the backend creates, so they never see "No access" in Business settings.
+const CATALOG_ADMIN_USER_IDS = (process.env.META_CATALOG_ADMIN_USER_IDS || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter((value) => /^\d+$/.test(value));
+
 /* =========================================================
    Helpers
 ========================================================= */
@@ -425,6 +432,21 @@ export async function POST(request: NextRequest) {
           );
         }
         return metaErrorResponse(error, "Could not create the catalog on Meta.");
+      }
+
+      // Give your own team full control of the new catalog (best effort)
+      for (const adminUserId of CATALOG_ADMIN_USER_IDS) {
+        try {
+          await graphRequest("POST", `${metaCatalogId}/assigned_users`, creationToken, {
+            user: adminUserId,
+            tasks: ["MANAGE"],
+          });
+        } catch (error) {
+          console.error(
+            `[Catalog Sync] could not assign catalog ${metaCatalogId} to user ${adminUserId}`,
+            error
+          );
+        }
       }
 
       // Link the new catalog to the WhatsApp Business Account (best effort)
