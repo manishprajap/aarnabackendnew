@@ -22,12 +22,18 @@ const MEDIA_ORIGIN =
 // Meta requires a product "link". Used when a product has no url of its own.
 const DEFAULT_PRODUCT_LINK = process.env.CATALOG_DEFAULT_LINK || MEDIA_ORIGIN;
 
-// Optional: platform-level Business ID and a system-user token that has
-// catalog_management + business_management. Used only to CREATE a catalog
-// when the seller's own token is not allowed to.
+// Platform-level Business ID and a system-user token that has
+// catalog_management + business_management. When both are set, catalogs are
+// created in the PLATFORM business with the PLATFORM token, then linked to the
+// seller's WABA.
 const PLATFORM_BUSINESS_ID = process.env.META_BUSINESS_ID || null;
 const PLATFORM_CATALOG_TOKEN =
   process.env.META_CATALOG_ACCESS_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
+
+// Optional: only used to log which scopes a failing token really has.
+const META_APP_ID = process.env.META_APP_ID || process.env.FACEBOOK_APP_ID || null;
+const META_APP_SECRET =
+  process.env.META_APP_SECRET || process.env.FACEBOOK_APP_SECRET || null;
 
 const BATCH_SIZE = 100;
 
@@ -74,6 +80,12 @@ async function graphRequest(
   const data: any = await res.json().catch(() => ({}));
 
   if (!res.ok || data?.error) {
+    // Full Meta error body (error_user_msg, fbtrace_id, ...) for debugging.
+    console.error(
+      `[Catalog Sync] Graph ${method} ${pathName.split("?")[0]} failed:`,
+      JSON.stringify(data?.error ?? data)
+    );
+
     throw new MetaError(
       data?.error?.error_user_msg ||
         data?.error?.message ||
@@ -84,6 +96,25 @@ async function graphRequest(
   }
 
   return data;
+}
+
+/** Logs the scopes of a token (never the token itself). Debug aid only. */
+async function logTokenScopes(label: string, token: string) {
+  if (!META_APP_ID || !META_APP_SECRET) return;
+  try {
+    const res = await fetch(
+      `${GRAPH}/debug_token?input_token=${encodeURIComponent(token)}` +
+        `&access_token=${encodeURIComponent(`${META_APP_ID}|${META_APP_SECRET}`)}`
+    );
+    const data: any = await res.json().catch(() => ({}));
+    console.error(
+      `[Catalog Sync] ${label} token -> type=${data?.data?.type} valid=${data?.data?.is_valid} ` +
+        `scopes=${JSON.stringify(data?.data?.scopes)} ` +
+        `granular=${JSON.stringify(data?.data?.granular_scopes)}`
+    );
+  } catch (error) {
+    console.error("[Catalog Sync] debug_token failed", error);
+  }
 }
 
 /** "(#100) Missing Permission", OAuthException 10, or the 200-299 permission range. */
@@ -228,8 +259,7 @@ export async function POST(request: NextRequest) {
     const accessToken = connection.accessToken;
     const wabaId = connection.wabaId || null;
 
-    // Business that owns this seller's WABA. Each seller can belong to a different
-    // business, so the catalog has to be created in that business.
+    // Business that owns this seller's WABA (only used when no platform token is set).
     let ownerBusinessId: string | null = null;
     if (wabaId) {
       try {
@@ -246,10 +276,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const businessId = ownerBusinessId || PLATFORM_BUSINESS_ID;
+    // IMPORTANT: a token can only create a catalog inside a business it belongs to.
+    // - Platform token + platform business  -> create in YOUR business, then link to the seller's WABA.
+    // - Otherwise (seller token)             -> create in the seller's own business.
+    const usingPlatformToken = Boolean(PLATFORM_CATALOG_TOKEN && PLATFORM_BUSINESS_ID);
+    const businessId = usingPlatformToken
+      ? PLATFORM_BUSINESS_ID
+      : ownerBusinessId || PLATFORM_BUSINESS_ID;
 
-    // The platform system-user token has partner access to every connected seller WABA,
-    // so prefer it for catalog calls and fall back to the seller's own token.
     const catalogToken = PLATFORM_CATALOG_TOKEN || accessToken;
 
     /* ---- Make sure the catalog exists on Meta ---- */
@@ -299,7 +333,17 @@ export async function POST(request: NextRequest) {
         );
         metaCatalogId = String(created.id);
       } catch (error) {
-        console.error("[Catalog Sync] catalog creation failed", error);
+        console.error(
+          `[Catalog Sync] catalog creation failed (business=${businessId}, ` +
+            `platformToken=${usingPlatformToken})`,
+          error
+        );
+        if (isPermissionError(error)) {
+          await logTokenScopes(
+            PLATFORM_CATALOG_TOKEN ? "platform" : "seller",
+            creationToken
+          );
+        }
         return metaErrorResponse(error, "Could not create the catalog on Meta.");
       }
 
