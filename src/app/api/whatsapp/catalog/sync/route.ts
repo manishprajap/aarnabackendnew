@@ -22,12 +22,25 @@ const MEDIA_ORIGIN =
 // Meta requires a product "link". Used when a product has no url of its own.
 const DEFAULT_PRODUCT_LINK = process.env.CATALOG_DEFAULT_LINK || MEDIA_ORIGIN;
 
-// Optional: platform-level Business ID and a system-user token that has
-// catalog_management + business_management. Used only to CREATE a catalog
-// when the seller's own token is not allowed to.
+// Platform-level Business ID and a system-user token that has
+// catalog_management + business_management. When both are set, catalogs are
+// created in the PLATFORM business with the PLATFORM token, then linked to the
+// seller's WABA.
 const PLATFORM_BUSINESS_ID = process.env.META_BUSINESS_ID || null;
 const PLATFORM_CATALOG_TOKEN =
   process.env.META_CATALOG_ACCESS_TOKEN || process.env.META_SYSTEM_USER_TOKEN || null;
+
+// Optional: only used to log which scopes a failing token really has.
+const DEBUG_APP_ID =
+  process.env.META_APP_ID ||
+  process.env.META_FACEBOOK_APP_ID ||
+  process.env.FACEBOOK_APP_ID ||
+  null;
+const DEBUG_APP_SECRET =
+  process.env.META_APP_SECRET ||
+  process.env.META_FACEBOOK_APP_SECRET ||
+  process.env.FACEBOOK_APP_SECRET ||
+  null;
 
 const BATCH_SIZE = 100;
 
@@ -74,6 +87,12 @@ async function graphRequest(
   const data: any = await res.json().catch(() => ({}));
 
   if (!res.ok || data?.error) {
+    // Full Meta error body (error_user_msg, fbtrace_id, ...) for debugging.
+    console.error(
+      `[Catalog Sync] Graph ${method} ${pathName.split("?")[0]} failed:`,
+      JSON.stringify(data?.error ?? data)
+    );
+
     throw new MetaError(
       data?.error?.error_user_msg ||
         data?.error?.message ||
@@ -86,9 +105,44 @@ async function graphRequest(
   return data;
 }
 
+/** True when the token can load this Meta catalog (it exists and is accessible). */
+async function isCatalogUsable(metaCatalogId: string, token: string): Promise<boolean> {
+  try {
+    const result = await graphRequest("GET", `${metaCatalogId}?fields=id,name`, token);
+    return Boolean(result?.id);
+  } catch {
+    return false;
+  }
+}
+
+/** Logs the scopes of a token (never the token itself). Debug aid only. */
+async function logTokenScopes(label: string, token: string) {
+  if (!DEBUG_APP_ID || !DEBUG_APP_SECRET) return;
+  try {
+    const res = await fetch(
+      `${GRAPH}/debug_token?input_token=${encodeURIComponent(token)}` +
+        `&access_token=${encodeURIComponent(`${DEBUG_APP_ID}|${DEBUG_APP_SECRET}`)}`
+    );
+    const data: any = await res.json().catch(() => ({}));
+    console.error(
+      `[Catalog Sync] ${label} token -> type=${data?.data?.type} valid=${data?.data?.is_valid} ` +
+        `scopes=${JSON.stringify(data?.data?.scopes)} ` +
+        `granular=${JSON.stringify(data?.data?.granular_scopes)}`
+    );
+  } catch (error) {
+    console.error("[Catalog Sync] debug_token failed", error);
+  }
+}
+
+/** Catalog ID does not exist or the token cannot load it (code 100, subcode 33). */
+function isCatalogNotFound(error: unknown): boolean {
+  return error instanceof MetaError && error.code === 100 && error.subcode === 33;
+}
+
 /** "(#100) Missing Permission", OAuthException 10, or the 200-299 permission range. */
 function isPermissionError(error: unknown): boolean {
   if (!(error instanceof MetaError)) return false;
+  if (isCatalogNotFound(error)) return false;
   if (error.code === 10) return true;
   if (error.code !== undefined && error.code >= 200 && error.code <= 299) return true;
   return error.code === 100 && /permission/i.test(error.message);
@@ -108,7 +162,24 @@ const PERMISSION_MESSAGE =
 const TOKEN_MESSAGE =
   "The WhatsApp access token is invalid or expired. Please reconnect WhatsApp.";
 
+const CATALOG_NOT_FOUND_MESSAGE =
+  "The linked Meta catalog no longer exists or the platform token cannot access it. " +
+  "Tap Sync Meta again to create a fresh catalog, or save a valid catalog ID in " +
+  "whatsapp_catalogs.meta_catalog_id.";
+
 function metaErrorResponse(error: unknown, fallback: string) {
+  if (isCatalogNotFound(error)) {
+    return NextResponse.json(
+      {
+        success: false,
+        code: "META_CATALOG_NOT_FOUND",
+        message: CATALOG_NOT_FOUND_MESSAGE,
+        metaMessage: (error as MetaError).message,
+      },
+      { status: 400 }
+    );
+  }
+
   if (isPermissionError(error)) {
     return NextResponse.json(
       {
@@ -228,8 +299,7 @@ export async function POST(request: NextRequest) {
     const accessToken = connection.accessToken;
     const wabaId = connection.wabaId || null;
 
-    // Business that owns this seller's WABA. Each seller can belong to a different
-    // business, so the catalog has to be created in that business.
+    // Business that owns this seller's WABA (only used when no platform token is set).
     let ownerBusinessId: string | null = null;
     if (wabaId) {
       try {
@@ -246,17 +316,53 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const businessId = ownerBusinessId || PLATFORM_BUSINESS_ID;
+    // IMPORTANT: a token can only create a catalog inside a business it belongs to.
+    // - Platform token + platform business  -> create in YOUR business, then link to the seller's WABA.
+    // - Otherwise (seller token)             -> create in the seller's own business.
+    const usingPlatformToken = Boolean(PLATFORM_CATALOG_TOKEN && PLATFORM_BUSINESS_ID);
+    const businessId = usingPlatformToken
+      ? PLATFORM_BUSINESS_ID
+      : ownerBusinessId || PLATFORM_BUSINESS_ID;
 
-    // The platform system-user token has partner access to every connected seller WABA,
-    // so prefer it for catalog calls and fall back to the seller's own token.
+    // The same token is used to create the catalog AND to push products, so every
+    // catalog we reuse must be reachable with this token.
     const catalogToken = PLATFORM_CATALOG_TOKEN || accessToken;
 
     /* ---- Make sure the catalog exists on Meta ---- */
 
-    let metaCatalogId: string | null = manualMetaCatalogId || catalog.metaCatalogId || null;
+    let metaCatalogId: string | null = null;
 
-    // 1) Reuse a catalog that is already linked to the seller's WABA.
+    // 0) A manually supplied ID must be usable, otherwise tell the caller.
+    if (manualMetaCatalogId) {
+      if (!(await isCatalogUsable(manualMetaCatalogId, catalogToken))) {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "META_CATALOG_NOT_FOUND",
+            message:
+              `Meta catalog ${manualMetaCatalogId} was not found or the platform token cannot access it. ` +
+              "Assign the catalog to the system user with full control, then try again.",
+          },
+          { status: 400 }
+        );
+      }
+      metaCatalogId = manualMetaCatalogId;
+    }
+
+    // 1) The catalog ID saved in the database. It may be stale (deleted on Meta,
+    //    or owned by a business this token cannot reach), so verify it first.
+    if (!metaCatalogId && catalog.metaCatalogId) {
+      if (await isCatalogUsable(catalog.metaCatalogId, catalogToken)) {
+        metaCatalogId = catalog.metaCatalogId;
+      } else {
+        console.warn(
+          `[Catalog Sync] saved Meta catalog ${catalog.metaCatalogId} is not usable; ` +
+            "it will be replaced."
+        );
+      }
+    }
+
+    // 2) Reuse a catalog already linked to the seller's WABA, if the platform token can use it.
     if (!metaCatalogId && wabaId) {
       try {
         const linked = await graphRequest(
@@ -264,15 +370,23 @@ export async function POST(request: NextRequest) {
           `${wabaId}/product_catalogs?fields=id,name&limit=10`,
           accessToken
         );
-        const first = Array.isArray(linked?.data) ? linked.data[0] : null;
-        if (first?.id) metaCatalogId = String(first.id);
+        const candidates: any[] = Array.isArray(linked?.data) ? linked.data : [];
+        for (const candidate of candidates) {
+          if (candidate?.id && (await isCatalogUsable(String(candidate.id), catalogToken))) {
+            metaCatalogId = String(candidate.id);
+            break;
+          }
+          console.warn(
+            `[Catalog Sync] WABA catalog ${candidate?.id} skipped: not accessible with the catalog token`
+          );
+        }
       } catch (error) {
         // Not fatal: fall through to creating a catalog.
         console.error("[Catalog Sync] could not list WABA catalogs", error);
       }
     }
 
-    // 2) Create a new catalog on Meta.
+    // 3) Create a new catalog on Meta.
     if (!metaCatalogId) {
       if (!businessId) {
         return NextResponse.json(
@@ -299,7 +413,17 @@ export async function POST(request: NextRequest) {
         );
         metaCatalogId = String(created.id);
       } catch (error) {
-        console.error("[Catalog Sync] catalog creation failed", error);
+        console.error(
+          `[Catalog Sync] catalog creation failed (business=${businessId}, ` +
+            `platformToken=${usingPlatformToken})`,
+          error
+        );
+        if (isPermissionError(error)) {
+          await logTokenScopes(
+            PLATFORM_CATALOG_TOKEN ? "platform" : "seller",
+            creationToken
+          );
+        }
         return metaErrorResponse(error, "Could not create the catalog on Meta.");
       }
 
@@ -392,9 +516,11 @@ export async function POST(request: NextRequest) {
         console.error("[Catalog Sync] batch failed", error);
         errors.push(error);
 
-        const message = isPermissionError(error)
-          ? PERMISSION_MESSAGE
-          : error?.message || "Sync failed";
+        const message = isCatalogNotFound(error)
+          ? CATALOG_NOT_FOUND_MESSAGE
+          : isPermissionError(error)
+            ? PERMISSION_MESSAGE
+            : error?.message || "Sync failed";
 
         for (const p of chunk) {
           await db
