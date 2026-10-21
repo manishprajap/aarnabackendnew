@@ -66,11 +66,24 @@ export async function GET(request: NextRequest) {
    Signature check (X-Hub-Signature-256)
 ===================================================== */
 
-function isValidSignature(rawBody: string, signatureHeader: string | null): boolean {
-  const appSecret = (process.env.META_APP_SECRET || process.env.META_FACEBOOK_APP_SECRET)?.trim();
+const SECRET_ENV_NAMES = [
+  'META_APP_SECRET',
+  'META_FACEBOOK_APP_SECRET',
+  'WHATSAPP_APP_SECRET',
+  'FACEBOOK_APP_SECRET',
+];
 
-  if (!appSecret) {
-    console.error('[WhatsApp Webhook] META_APP_SECRET (or META_FACEBOOK_APP_SECRET) is missing');
+// Safe fingerprint (secret nahi dikhta) - sirf compare karne ke liye
+const fingerprint = (value: string) =>
+  crypto.createHash('sha256').update(value).digest('hex').slice(0, 8);
+
+function isValidSignature(rawBody: string, signatureHeader: string | null): boolean {
+  const secrets = SECRET_ENV_NAMES
+    .map((name) => ({ name, value: (process.env[name] || '').trim().replace(/^["']|["']$/g, '') }))
+    .filter((item) => item.value);
+
+  if (secrets.length === 0) {
+    console.error('[WhatsApp Webhook] No app secret env found. Tried:', SECRET_ENV_NAMES.join(', '));
     return false;
   }
   if (!signatureHeader) {
@@ -78,17 +91,29 @@ function isValidSignature(rawBody: string, signatureHeader: string | null): bool
     return false;
   }
 
-  const expected =
-    'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+  const received = Buffer.from(signatureHeader);
 
-  try {
-    const a = Buffer.from(signatureHeader);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
+  for (const { name, value } of secrets) {
+    const expected = Buffer.from(
+      'sha256=' + crypto.createHmac('sha256', value).update(rawBody).digest('hex')
+    );
+    if (expected.length === received.length && crypto.timingSafeEqual(expected, received)) {
+      console.log('[WhatsApp Webhook] Signature OK using', name);
+      return true;
+    }
   }
+
+  // TEMPORARY DEBUG: kaam hone ke baad hata dein
+  console.warn('[WhatsApp Webhook] Signature mismatch. Debug:', {
+    bodyLength: rawBody.length,
+    headerPrefix: signatureHeader.slice(0, 14),
+    tried: secrets.map((item) => ({
+      env: item.name,
+      length: item.value.length,
+      fingerprint: fingerprint(item.value),
+    })),
+  });
+  return false;
 }
 
 /* =====================================================
