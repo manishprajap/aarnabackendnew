@@ -148,15 +148,6 @@ export async function refreshCounters(campaignId: number) {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ------------------------------ dispatch ------------------------------ */
-
-/**
- * Sends every pending recipient of a campaign through the WhatsApp Cloud API.
- * delivered/read receipts arrive later via your webhook — call applyDeliveryStatus() there.
- *
- * Fire-and-forget from the API routes is fine on a long-running Node server. On serverless
- * (Vercel etc.) the function can be frozen after the response, so also hit
- * GET /api/whatsapp/campaigns/dispatch from a cron — it resumes anything left 'sending'/'scheduled'.
- */
 export async function dispatchCampaign(campaignId: number) {
   const c = whatsappCampaigns;
   const r = whatsappCampaignRecipients;
@@ -290,12 +281,6 @@ export async function dispatchDueCampaigns() {
 /* ------------------------------ webhook hook ------------------------------ */
 
 const RANK: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 3 };
-
-/**
- * Call this from your /api/whatsapp/callback webhook for every status update Meta sends
- * (statuses[].id, statuses[].status, statuses[].errors?.[0]?.message).
- * Safe to call for non-campaign messages — it simply finds nothing and returns.
- */
 export async function applyDeliveryStatus(
   waMessageId: string,
   status: "sent" | "delivered" | "read" | "failed",
