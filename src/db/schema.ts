@@ -1332,3 +1332,93 @@ export const usersRelations = relations(users, ({ many, one }) => ({
     references: [promptPlans.userId],
   }),
 }));
+
+export const whatsappCampaigns = mysqlTable(
+  'whatsapp_campaigns',
+  {
+    id: bigint('id', { mode: 'number' }).autoincrement().primaryKey(),
+    userId: int('user_id').notNull(),
+
+    name: varchar('name', { length: 255 }).notNull(),
+
+    /** Meta message-template ID (templates live in Meta, not in your DB) */
+    templateId: varchar('template_id', { length: 100 }).notNull(),
+    templateName: varchar('template_name', { length: 255 }).notNull(),
+    templateLanguage: varchar('template_language', { length: 20 }).notNull().default('en'),
+
+    /** Body variables {{1}}, {{2}}... in order */
+    parameters: json('parameters').$type<string[]>(),
+
+    /** draft | scheduled | sending | completed | cancelled | failed */
+    status: varchar('status', { length: 30 }).notNull().default('draft'),
+
+    total: int('total').notNull().default(0),
+    sent: int('sent_count').notNull().default(0),
+    delivered: int('delivered_count').notNull().default(0),
+    read: int('read_count').notNull().default(0),
+    failed: int('failed_count').notNull().default(0),
+
+    scheduledAt: timestamp('scheduled_at'),
+    optInConfirmedAt: timestamp('opt_in_confirmed_at'),
+    startedAt: timestamp('started_at'),
+    completedAt: timestamp('completed_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
+  },
+  (table) => ({
+    userIdx: index('whatsapp_campaigns_user_idx').on(table.userId),
+    userCreatedIdx: index('whatsapp_campaigns_user_created_idx').on(table.userId, table.createdAt),
+    statusScheduleIdx: index('whatsapp_campaigns_status_schedule_idx').on(
+      table.status,
+      table.scheduledAt
+    ),
+  })
+);
+
+export const whatsappCampaignRecipients = mysqlTable(
+  'whatsapp_campaign_recipients',
+  {
+    id: bigint('id', { mode: 'number' }).autoincrement().primaryKey(),
+    campaignId: bigint('campaign_id', { mode: 'number' }).notNull(),
+
+    /** E.164 digits, no leading + */
+    phoneNumber: varchar('phone_number', { length: 50 }).notNull(),
+    name: varchar('name', { length: 191 }),
+
+    /** pending | sent | delivered | read | failed | cancelled */
+    status: varchar('status', { length: 30 }).notNull().default('pending'),
+
+    /** Meta message ID — the WhatsApp webhook matches delivery/read receipts on this */
+    waMessageId: varchar('wa_message_id', { length: 255 }),
+    errorMessage: text('error_message'),
+
+    sentAt: timestamp('sent_at'),
+    deliveredAt: timestamp('delivered_at'),
+    readAt: timestamp('read_at'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
+  },
+  (table) => ({
+    campaignStatusIdx: index('whatsapp_campaign_recipients_campaign_status_idx').on(
+      table.campaignId,
+      table.status
+    ),
+    waMessageIdx: index('whatsapp_campaign_recipients_wa_message_idx').on(table.waMessageId),
+  })
+);
+
+export const whatsappCampaignsRelations = relations(whatsappCampaigns, ({ many }) => ({
+  recipients: many(whatsappCampaignRecipients),
+}));
+
+export const whatsappCampaignRecipientsRelations = relations(
+  whatsappCampaignRecipients,
+  ({ one }) => ({
+    campaign: one(whatsappCampaigns, {
+      fields: [whatsappCampaignRecipients.campaignId],
+      references: [whatsappCampaigns.id],
+    }),
+  })
+);
