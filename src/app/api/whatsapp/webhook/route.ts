@@ -210,13 +210,13 @@ function getMessageMetadata(
 
 /**
  * Validates X-Hub-Signature-256 using the raw request body.
- * Configure META_APP_SECRET with the Meta application's App Secret.
+ * Configure META_FACEBOOK_APP_SECRET with the Meta application's App Secret.
  */
 function verifyMetaSignature(
   rawBody: string,
   signatureHeader: string | null,
 ): boolean {
-  const appSecret = process.env.META_APP_SECRET;
+  const appSecret = process.env.META_FACEBOOK_APP_SECRET;
 
   if (!appSecret || !signatureHeader) {
     return false;
@@ -597,7 +597,7 @@ export async function POST(request: NextRequest) {
 
     if (!verifyMetaSignature(rawBody, signature)) {
       console.error(
-        '[WhatsApp Webhook] Invalid signature or META_APP_SECRET missing',
+        '[WhatsApp Webhook] Invalid signature or META_FACEBOOK_APP_SECRET missing',
       );
       return jsonError('Invalid webhook signature', 401);
     }
