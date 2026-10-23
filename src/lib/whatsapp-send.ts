@@ -575,3 +575,120 @@ export async function sendOutbound(input: {
 
   return { waMessageId };
 }
+
+export async function sendTemplateOutbound(input: {
+  userId: number;
+  conversationId: number;
+  connection: ActiveConnection;
+  to: string;
+  templateId: string;
+  templateName: string;
+  templateLanguage: string;
+  parameters: string[];
+}): Promise<{ waMessageId: string }> {
+  const to = normalizePhone(input.to);
+
+  if (!to) {
+    throw new WhatsAppSendError(
+      'Invalid recipient phone number. Enter a valid number with country code.'
+    );
+  }
+
+  const text = `[Template] ${input.templateName}`;
+  const metadata = {
+    templateId: input.templateId,
+    templateName: input.templateName,
+    templateLanguage: input.templateLanguage,
+    parameters: input.parameters,
+  };
+
+  let waMessageId: string;
+  try {
+    const sent = await metaFetch(
+      `${input.connection.phoneNumberId}/messages`,
+      input.connection.accessToken,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'template',
+          template: {
+            name: input.templateName,
+            language: { code: input.templateLanguage },
+            ...(input.parameters.length
+              ? {
+                  components: [
+                    {
+                      type: 'body',
+                      parameters: input.parameters.map((parameter) => ({
+                        type: 'text',
+                        text: parameter,
+                      })),
+                    },
+                  ],
+                }
+              : {}),
+          },
+        }),
+      }
+    );
+
+    waMessageId = String(sent?.messages?.[0]?.id || '');
+    if (!waMessageId) {
+      throw new WhatsAppSendError(
+        'Meta did not return a WhatsApp message ID.'
+      );
+    }
+  } catch (error) {
+    const sendError =
+      error instanceof WhatsAppSendError
+        ? error
+        : new WhatsAppSendError(
+            'WhatsApp could not send this template message. Please try again.',
+            502
+          );
+
+    await storeOutbound({
+      userId: input.userId,
+      conversationId: input.conversationId,
+      type: 'template',
+      text,
+      waMessageId: `failed-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`,
+      status: 'failed',
+      errorMessage: sendError.message,
+      metadata: {
+        ...metadata,
+        ...(sendError.metaCode ? { metaCode: sendError.metaCode } : {}),
+        ...(sendError.metaSubcode
+          ? { metaSubcode: sendError.metaSubcode }
+          : {}),
+      },
+    }).catch((storeError) => {
+      console.error(
+        '[WhatsApp Send] Could not store failed template message:',
+        storeError
+      );
+    });
+
+    throw sendError;
+  }
+
+  await storeOutbound({
+    userId: input.userId,
+    conversationId: input.conversationId,
+    type: 'template',
+    text,
+    waMessageId,
+    status: 'sent',
+    metadata,
+  });
+
+  return { waMessageId };
+}
