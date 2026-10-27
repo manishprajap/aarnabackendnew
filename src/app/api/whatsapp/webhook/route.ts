@@ -256,6 +256,7 @@ async function applyStatusUpdate(
 ): Promise<void> {
   const waMessageId = String(status?.id ?? '').trim();
   const statusName = String(status?.status ?? '').toLowerCase();
+  const errors = Array.isArray(status?.errors) ? status.errors : [];
 
   if (!waMessageId || !Object.hasOwn(STATUS_RANK, statusName)) {
     console.warn('[WhatsApp Webhook] Invalid status callback', {
@@ -265,12 +266,25 @@ async function applyStatusUpdate(
     return;
   }
 
+  // Log Meta's actual failure payload. This is the key diagnostic information
+  // needed to identify template, recipient, registration, or token problems.
+  if (statusName === 'failed') {
+    console.error('[WhatsApp Webhook] Meta reported message delivery failure:', {
+      waMessageId,
+      recipientId: status.recipient_id ?? null,
+      timestamp: status.timestamp ?? null,
+      errors: errors.map((error) => ({
+        code: error.code ?? null,
+        title: error.title ?? null,
+        message: error.message ?? null,
+        details: error.error_data?.details ?? null,
+      })),
+    });
+  }
+
   const eventDate = unixTimestampToDate(status.timestamp);
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    // Meta message IDs should identify one stored outgoing message.
-    // Limit to 2 so duplicates can be detected instead of updating an
-    // arbitrary customer's message.
     const matches = await db
       .select({
         id: whatsappMessages.id,
@@ -288,10 +302,11 @@ async function applyStatusUpdate(
         continue;
       }
 
-      console.warn(
-        '[WhatsApp Webhook] Status received for an unknown message:',
-        { waMessageId, statusName },
-      );
+      console.warn('[WhatsApp Webhook] Status received for an unknown message:', {
+        waMessageId,
+        statusName,
+        errors: statusName === 'failed' ? errors : undefined,
+      });
       return;
     }
 
@@ -305,7 +320,6 @@ async function applyStatusUpdate(
 
     const message = matches[0];
 
-    // Do not change an inbound message from an outgoing delivery callback.
     if (message.direction !== 'outbound') {
       console.warn('[WhatsApp Webhook] Status belongs to a non-outbound row:', {
         messageRowId: message.id,
@@ -317,16 +331,22 @@ async function applyStatusUpdate(
 
     const currentStatus = String(message.status ?? '').toLowerCase();
 
-    // Do not regress delivered/read messages when an older callback arrives.
+    // A failure may arrive after "sent", so allow sent -> failed.
+    // But never downgrade a message already delivered/read to failed.
+    const alreadyDeliveredOrRead =
+      currentStatus === 'delivered' || currentStatus === 'read';
+
     if (
-      statusName !== 'failed' &&
-      Object.hasOwn(STATUS_RANK, currentStatus) &&
-      STATUS_RANK[currentStatus] > STATUS_RANK[statusName]
+      (statusName === 'failed' && alreadyDeliveredOrRead) ||
+      (statusName !== 'failed' &&
+        Object.hasOwn(STATUS_RANK, currentStatus) &&
+        STATUS_RANK[currentStatus] > STATUS_RANK[statusName])
     ) {
-      console.info('[WhatsApp Webhook] Ignoring older status callback:', {
+      console.info('[WhatsApp Webhook] Ignoring stale status callback:', {
         messageRowId: message.id,
         currentStatus,
         incomingStatus: statusName,
+        waMessageId,
       });
       return;
     }
@@ -342,8 +362,6 @@ async function applyStatusUpdate(
     } else if (statusName === 'read') {
       updateData.readAt = eventDate;
     } else if (statusName === 'failed') {
-      const errors = Array.isArray(status.errors) ? status.errors : [];
-
       updateData.errorMessage = errors.length
         ? errors
             .map((error) =>
@@ -357,7 +375,15 @@ async function applyStatusUpdate(
             )
             .filter(Boolean)
             .join('; ')
-        : 'WhatsApp message delivery failed';
+        : 'WhatsApp message delivery failed; Meta did not include error details';
+
+      // Store the raw structured error as well in server logs, without tokens.
+      console.error('[WhatsApp Webhook] Persisting failed message status:', {
+        messageRowId: message.id,
+        userId: message.userId,
+        waMessageId,
+        errorMessage: updateData.errorMessage,
+      });
     }
 
     await db
@@ -369,7 +395,11 @@ async function applyStatusUpdate(
       messageRowId: message.id,
       userId: message.userId,
       waMessageId,
+      previousStatus: currentStatus || null,
       statusName,
+      ...(statusName === 'failed'
+        ? { errorMessage: updateData.errorMessage }
+        : {}),
     });
 
     return;

@@ -73,6 +73,9 @@ export function normalizePhone(input: unknown): string | null {
 
 function friendlyMetaError(error: any): string {
   switch (Number(error?.code)) {
+    case 131042:
+      return 'Meta rejected this message because the WhatsApp Business Account billing currency is not configured. In Meta Business Suite, open Billing & payments and complete the currency setup for the WhatsApp Business Account, then retry. The catalog product currency setting does not affect message sending.';
+
     case 131047:
       return 'The 24-hour customer service window has expired. Send an approved WhatsApp template message instead.';
 
