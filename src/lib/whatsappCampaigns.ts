@@ -1,4 +1,5 @@
 // Shared helpers for /api/whatsapp/campaigns/* and /api/whatsapp/analytics (Drizzle + MySQL).
+// NOTE: the actual sending logic lives in "@/lib/whatsappCampaignDispatch".
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import {
@@ -7,7 +8,7 @@ import {
   whatsappCampaigns,
   whatsappCampaignRecipients,
 } from "@/db/schema";
-import { and, eq, inArray, lte, ne, sql, gte } from "drizzle-orm";
+import { and, eq, inArray, lte, sql, gte } from "drizzle-orm";
 
 export const GRAPH_URL = "https://graph.facebook.com/v20.0";
 
@@ -122,6 +123,7 @@ export function serializeCampaign(c: Campaign) {
     name: c.name,
     templateId: c.templateId,
     templateName: c.templateName,
+    customMessage: c.customMessage ?? null,
     status: c.status,
     total: c.total,
     sent: c.sent,
@@ -153,113 +155,16 @@ export async function refreshCounters(campaignId: number) {
     .where(eq(whatsappCampaigns.id, campaignId));
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 /* ------------------------------ dispatch ------------------------------ */
-export async function dispatchCampaign(campaignId: number) {
-  const c = whatsappCampaigns;
-  const r = whatsappCampaignRecipients;
 
-  const [campaign] = await db.select().from(c).where(eq(c.id, campaignId)).limit(1);
-  if (!campaign || campaign.status === "cancelled") return;
-
-  const conn = await getActiveConnection(campaign.userId);
-  if (!conn) {
-    await db.update(c).set({ status: "failed" }).where(eq(c.id, campaignId));
-    return;
-  }
-  const accessToken = getAccessToken(conn.accessToken);
-
-  await db
-    .update(c)
-    .set({ status: "sending", startedAt: campaign.startedAt ?? new Date() })
-    .where(and(eq(c.id, campaignId), ne(c.status, "cancelled")));
-
-  const parameters = campaign.parameters ?? [];
-  const BATCH = 20;
-
-  while (true) {
-    // Stop if cancelled (or otherwise moved out of 'sending') mid-flight
-    const [current] = await db
-      .select({ status: c.status })
-      .from(c)
-      .where(eq(c.id, campaignId))
-      .limit(1);
-    if (!current || current.status !== "sending") return;
-
-    const batch = await db
-      .select()
-      .from(r)
-      .where(and(eq(r.campaignId, campaignId), eq(r.status, "pending")))
-      .limit(BATCH);
-    if (batch.length === 0) break;
-
-    await Promise.all(
-      batch.map(async (rec) => {
-        try {
-          const res = await fetch(`${GRAPH_URL}/${conn.phoneNumberId}/messages`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              messaging_product: "whatsapp",
-              to: rec.phoneNumber,
-              type: "template",
-              template: {
-                name: campaign.templateName,
-                language: { code: campaign.templateLanguage },
-                components: parameters.length
-                  ? [
-                      {
-                        type: "body",
-                        parameters: parameters.map((text) => ({ type: "text", text })),
-                      },
-                    ]
-                  : [],
-              },
-            }),
-          });
-          const body: any = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
-
-          await db
-            .update(r)
-            .set({
-              status: "sent",
-              waMessageId: body?.messages?.[0]?.id ?? null,
-              errorMessage: null,
-              sentAt: new Date(),
-            })
-            .where(eq(r.id, rec.id));
-        } catch (err: any) {
-          await db
-            .update(r)
-            .set({ status: "failed", errorMessage: String(err?.message ?? err).slice(0, 500) })
-            .where(eq(r.id, rec.id));
-        }
-      })
-    );
-
-    await refreshCounters(campaignId);
-    await sleep(1000); // gentle rate limiting
-  }
-
-  await refreshCounters(campaignId);
-  const [fin] = await db
-    .select({ sent: c.sent, failed: c.failed })
-    .from(c)
-    .where(eq(c.id, campaignId))
-    .limit(1);
-
-  await db
-    .update(c)
-    .set({
-      status: fin && fin.sent === 0 && fin.failed > 0 ? "failed" : "completed",
-      completedAt: new Date(),
-    })
-    .where(and(eq(c.id, campaignId), eq(c.status, "sending")));
+/**
+ * Thin wrapper so any existing `import { dispatchCampaign } from "@/lib/whatsappCampaigns"`
+ * keeps working. The real implementation (custom message + template fallback) lives in
+ * "@/lib/whatsappCampaignDispatch". Imported lazily to avoid a circular import.
+ */
+export async function dispatchCampaign(campaignId: number): Promise<void> {
+  const { dispatchCampaign: run } = await import("@/lib/whatsappCampaignDispatch");
+  await run(campaignId);
 }
 
 /** Picks up scheduled campaigns whose time has come. Used by the cron route. */

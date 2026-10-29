@@ -1340,31 +1340,22 @@ export const whatsappCampaigns = mysqlTable(
   {
     id: bigint('id', { mode: 'number' }).autoincrement().primaryKey(),
     userId: int('user_id').notNull(),
-
     name: varchar('name', { length: 255 }).notNull(),
-
-    /** Meta message-template ID (templates live in Meta, not in your DB) */
     templateId: varchar('template_id', { length: 100 }).notNull(),
     templateName: varchar('template_name', { length: 255 }).notNull(),
     templateLanguage: varchar('template_language', { length: 20 }).notNull().default('en'),
-
-    /** Body variables {{1}}, {{2}}... in order */
     parameters: json('parameters').$type<string[]>(),
-
-    /** draft | scheduled | sending | completed | cancelled | failed */
     status: varchar('status', { length: 30 }).notNull().default('draft'),
-
     total: int('total').notNull().default(0),
+    customMessage: text("custom_message"),
     sent: int('sent_count').notNull().default(0),
     delivered: int('delivered_count').notNull().default(0),
     read: int('read_count').notNull().default(0),
     failed: int('failed_count').notNull().default(0),
-
     scheduledAt: timestamp('scheduled_at'),
     optInConfirmedAt: timestamp('opt_in_confirmed_at'),
     startedAt: timestamp('started_at'),
     completedAt: timestamp('completed_at'),
-
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
   },

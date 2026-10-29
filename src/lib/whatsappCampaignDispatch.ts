@@ -7,8 +7,9 @@
  *   in the last 24 hours -> free-text message (inside WhatsApp's customer service window).
  * - Otherwise (or if free-text is rejected as outside the window) -> approved template.
  *
- * Requires a new nullable TEXT column `customMessage` (custom_message) on whatsappCampaigns.
  * {{name}} works in both the custom message and in template parameters.
+ * Counters are always recomputed with refreshCounters() so they stay consistent with
+ * the webhook (delivered / read updates).
  */
 import { db } from "@/db";
 import {
@@ -18,13 +19,17 @@ import {
   whatsappConversations,
   whatsappMessages,
 } from "@/db/schema";
-import { and, eq, inArray, max, sql } from "drizzle-orm";
-import { getActiveConnection, getAccessToken } from "@/lib/whatsappCampaigns";
+import { and, eq, inArray, max } from "drizzle-orm";
+import {
+  GRAPH_URL,
+  getActiveConnection,
+  getAccessToken,
+  refreshCounters,
+} from "@/lib/whatsappCampaigns";
 
-const GRAPH_VERSION = "v21.0";
 const CONCURRENCY = 10;
 const WINDOW_MS = 24 * 60 * 60 * 1000;
-// Meta error: "re-engagement message" = free-text attempted outside the 24h window.
+// Meta error 131047 = "re-engagement message": free-text attempted outside the 24h window.
 const OUTSIDE_WINDOW_CODE = "131047";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -51,21 +56,18 @@ async function postMessage(
   payload: Record<string, unknown>
 ): Promise<SendResult> {
   try {
-    const res = await fetch(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          ...payload,
-        }),
-      }
-    );
+    const res = await fetch(`${GRAPH_URL}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        ...payload,
+      }),
+    });
 
     const data: any = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -127,7 +129,7 @@ function sendText(opts: {
   });
 }
 
-/** Returns the set of phone numbers that sent us a message within the last 24 hours. */
+/** Returns the phone numbers that sent this business a message within the last 24 hours. */
 async function getRecipientsInsideWindow(userId: number, phones: string[]): Promise<Set<string>> {
   const inside = new Set<string>();
   if (phones.length === 0) return inside;
@@ -161,25 +163,21 @@ async function getRecipientsInsideWindow(userId: number, phones: string[]): Prom
 }
 
 export async function dispatchCampaign(campaignId: number): Promise<void> {
-  const [campaign] = await db
-    .select()
-    .from(whatsappCampaigns)
-    .where(eq(whatsappCampaigns.id, campaignId))
-    .limit(1);
+  const c = whatsappCampaigns;
+  const r = whatsappCampaignRecipients;
+
+  const [campaign] = await db.select().from(c).where(eq(c.id, campaignId)).limit(1);
   if (!campaign) return;
   if (campaign.status !== "sending" && campaign.status !== "scheduled") return;
 
   await db
-    .update(whatsappCampaigns)
-    .set({ status: "sending" })
-    .where(eq(whatsappCampaigns.id, campaignId));
+    .update(c)
+    .set({ status: "sending", startedAt: campaign.startedAt ?? new Date() })
+    .where(eq(c.id, campaignId));
 
   const conn: any = await getActiveConnection(campaign.userId);
   if (!conn) {
-    await db
-      .update(whatsappCampaigns)
-      .set({ status: "failed" })
-      .where(eq(whatsappCampaigns.id, campaignId));
+    await db.update(c).set({ status: "failed" }).where(eq(c.id, campaignId));
     return;
   }
 
@@ -187,26 +185,21 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
   const parameters: string[] = Array.isArray(campaign.parameters)
     ? (campaign.parameters as string[])
     : [];
-  const customMessage = String((campaign as any).customMessage ?? "").trim();
+  const customMessage = (campaign.customMessage ?? "").trim();
 
   while (true) {
     // Stop if the user cancelled while we were sending
     const [current] = await db
-      .select({ status: whatsappCampaigns.status })
-      .from(whatsappCampaigns)
-      .where(eq(whatsappCampaigns.id, campaignId))
+      .select({ status: c.status })
+      .from(c)
+      .where(eq(c.id, campaignId))
       .limit(1);
     if (!current || current.status !== "sending") return;
 
     const batch = await db
       .select()
-      .from(whatsappCampaignRecipients)
-      .where(
-        and(
-          eq(whatsappCampaignRecipients.campaignId, campaignId),
-          eq(whatsappCampaignRecipients.status, "pending")
-        )
-      )
+      .from(r)
+      .where(and(eq(r.campaignId, campaignId), eq(r.status, "pending")))
       .limit(CONCURRENCY);
 
     if (batch.length === 0) break;
@@ -214,7 +207,7 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
     const insideWindow = customMessage
       ? await getRecipientsInsideWindow(
           campaign.userId,
-          batch.map((r) => r.phoneNumber)
+          batch.map((rec) => rec.phoneNumber)
         )
       : new Set<string>();
 
@@ -241,7 +234,7 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
           });
           if (textResult.ok) return textResult;
 
-          // Window was actually closed (or similar) -> fall back to the template.
+          // Window was actually closed -> fall back to the approved template.
           if (textResult.error.includes(OUTSIDE_WINDOW_CODE)) return sendAsTemplate();
           return textResult;
         }
@@ -250,39 +243,42 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
       })
     );
 
-    let sentCount = 0;
-    let failedCount = 0;
-
     for (let i = 0; i < batch.length; i++) {
       const result = results[i];
       if (result.ok) {
-        sentCount += 1;
         await db
-          .update(whatsappCampaignRecipients)
-          .set({ status: "sent", waMessageId: result.messageId, sentAt: new Date() })
-          .where(eq(whatsappCampaignRecipients.id, batch[i].id));
+          .update(r)
+          .set({
+            status: "sent",
+            waMessageId: result.messageId,
+            errorMessage: null,
+            sentAt: new Date(),
+          })
+          .where(eq(r.id, batch[i].id));
       } else {
-        failedCount += 1;
         await db
-          .update(whatsappCampaignRecipients)
+          .update(r)
           .set({ status: "failed", errorMessage: result.error })
-          .where(eq(whatsappCampaignRecipients.id, batch[i].id));
+          .where(eq(r.id, batch[i].id));
       }
     }
 
-    await db
-      .update(whatsappCampaigns)
-      .set({
-        sent: sql`${whatsappCampaigns.sent} + ${sentCount}`,
-        failed: sql`${whatsappCampaigns.failed} + ${failedCount}`,
-      })
-      .where(eq(whatsappCampaigns.id, campaignId));
-
+    await refreshCounters(campaignId);
     await sleep(250); // gentle pacing to stay within Meta rate limits
   }
 
+  await refreshCounters(campaignId);
+  const [fin] = await db
+    .select({ sent: c.sent, failed: c.failed })
+    .from(c)
+    .where(eq(c.id, campaignId))
+    .limit(1);
+
   await db
-    .update(whatsappCampaigns)
-    .set({ status: "completed", completedAt: new Date() })
-    .where(and(eq(whatsappCampaigns.id, campaignId), eq(whatsappCampaigns.status, "sending")));
+    .update(c)
+    .set({
+      status: fin && fin.sent === 0 && fin.failed > 0 ? "failed" : "completed",
+      completedAt: new Date(),
+    })
+    .where(and(eq(c.id, campaignId), eq(c.status, "sending")));
 }
