@@ -1372,6 +1372,35 @@ export const whatsappCampaigns = mysqlTable(
   })
 );
 
+export const whatsappLeads = mysqlTable(
+  'whatsapp_leads',
+  {
+    id: int('id').autoincrement().primaryKey(),
+    userId: int('user_id').notNull(),
+    contactId: int('contact_id').notNull(),
+    conversationId: int('conversation_id'),
+    phoneNumber: varchar('phone_number', { length: 32 }).notNull(),
+    name: varchar('name', { length: 255 }),
+    source: varchar('source', { length: 60 }).notNull().default('direct'),
+    adReferral: json('ad_referral'),
+    stage: varchar('stage', { length: 20 }).notNull().default('new'),
+    notes: text('notes'),
+    firstMessage: text('first_message'),
+    messageCount: int('message_count').notNull().default(1),
+    lastMessageAt: timestamp('last_message_at'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow().onUpdateNow(),
+  },
+  (table) => ({
+    userContactUnique: uniqueIndex('whatsapp_leads_user_contact_uq').on(
+      table.userId,
+      table.contactId,
+    ),
+    userStageIdx: index('whatsapp_leads_user_stage_idx').on(table.userId, table.stage),
+    userLastIdx: index('whatsapp_leads_user_last_idx').on(table.userId, table.lastMessageAt),
+  }),
+);
+
 export const whatsappCampaignRecipients = mysqlTable(
   'whatsapp_campaign_recipients',
   {
