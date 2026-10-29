@@ -54,6 +54,22 @@ mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0009_r
 
 Back up the database before applying schema changes. The repair migration preserves existing rows.
 
+## WhatsApp Gemini auto-replies
+
+The WhatsApp workspace's **AI replies** tab can enable per-business automatic replies to incoming text messages. Auto-replies are off by default. Apply `drizzle/0010_whatsapp_ai_automation.sql` before deploying the updated API, and configure `GEMINI_API_KEY` in the backend server environment. Never put the Gemini key in the mobile app or a client-side environment variable.
+
+When enabled for a connected number, the signed WhatsApp webhook saves the incoming message and conversation, then uses Gemini to draft a concise reply from the last ten text messages and the business instructions configured in the app. Only new text messages inside the 24-hour WhatsApp customer service window are auto-replied to; media messages are not. Gemini or Meta send failures are logged; failed replies are not automatically retried, so check the WhatsApp inbox and reply manually if needed. Make sure the WhatsApp Business Account is subscribed to the webhook and that customers are informed that their message text may be processed by Gemini.
+
+Apply the migration with the production database selected, after taking a backup:
+
+```sh
+mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0010_whatsapp_ai_automation.sql
+```
+
+The authenticated `GET` and `PATCH /api/whatsapp/automation` endpoints return or update the current account's opt-in setting and business instructions; the API never returns the Gemini key.
+
+The mobile app uses the local Next.js API at `http://localhost:3000/aarnexai-backend/api` during Vite development, and the production API in production builds. Set `VITE_API_BASE_URL` to override this (for example, on a physical phone use the development computer's LAN address instead of `localhost`). The backend allows the default Vite origin `http://localhost:5173`.
+
 ## YouTube and LinkedIn OAuth
 
 Create the OAuth applications in Google Cloud Console and the LinkedIn Developer Portal. Client secrets are provider-issued credentials and must not be committed or returned by an API response.

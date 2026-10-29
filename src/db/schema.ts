@@ -517,6 +517,8 @@ export const whatsappConnections = mysqlTable(
     tokenExpiresAt: timestamp('token_expires_at'),
 
     status: mysqlEnum('status', ['active', 'expired', 'revoked']).default('active').notNull(),
+    aiAutoReplyEnabled: boolean('ai_auto_reply_enabled').default(false).notNull(),
+    aiInstructions: text('ai_instructions'),
 
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),

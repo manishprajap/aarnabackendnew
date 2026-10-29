@@ -13,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aarnex AI Admin Console",
-  description: "Secure administration workspace for Aarnex AI.",
+  title: "Aarnex AI — Business Growth Workspace",
+  description:
+    "Create smarter marketing, manage customer conversations, and grow your business with Aarnex AI.",
   icons: {
     icon: "/aarnexai-backend/aarna-logo.png",
     shortcut: "/aarnexai-backend/aarna-logo.png",

@@ -1,3 +1,4 @@
+// src/app/api/whatsapp/claim/route.ts
 // Called by the app after Meta onboarding, and as a fallback poller.
 //
 // Response contract:
