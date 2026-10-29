@@ -1,20 +1,31 @@
 /**
  * lib/whatsappCampaignDispatch.ts
  *
- * Sends a campaign's approved template to every pending recipient, filling the
- * template variables ({{1}}, {{2}}…) with the campaign parameters. A parameter may
- * contain {{name}}, which is replaced with each recipient's name.
+ * Sends a campaign to every pending recipient.
  *
- * ADJUST if your schema differs: the recipient columns `errorMessage`, `waMessageId`,
- * `sentAt`, and the campaign columns `sent`, `failed`, `completedAt`.
+ * - If the campaign has a `customMessage` AND the recipient messaged this business
+ *   in the last 24 hours -> free-text message (inside WhatsApp's customer service window).
+ * - Otherwise (or if free-text is rejected as outside the window) -> approved template.
+ *
+ * Requires a new nullable TEXT column `customMessage` (custom_message) on whatsappCampaigns.
+ * {{name}} works in both the custom message and in template parameters.
  */
 import { db } from "@/db";
-import { whatsappCampaigns, whatsappCampaignRecipients } from "@/db/schema";
-import { and, eq, sql } from "drizzle-orm";
+import {
+  whatsappCampaigns,
+  whatsappCampaignRecipients,
+  whatsappContacts,
+  whatsappConversations,
+  whatsappMessages,
+} from "@/db/schema";
+import { and, eq, inArray, max, sql } from "drizzle-orm";
 import { getActiveConnection, getAccessToken } from "@/lib/whatsappCampaigns";
 
 const GRAPH_VERSION = "v21.0";
 const CONCURRENCY = 10;
+const WINDOW_MS = 24 * 60 * 60 * 1000;
+// Meta error: "re-engagement message" = free-text attempted outside the 24h window.
+const OUTSIDE_WINDOW_CODE = "131047";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -24,14 +35,51 @@ function sanitizeParam(value: string): string {
   return cleaned || "-";
 }
 
+function fillName(value: string, recipientName: string | null): string {
+  return value.replace(/\{\{\s*name\s*\}\}/gi, recipientName?.trim() || "there");
+}
+
 function fillParam(value: string, recipientName: string | null): string {
-  const filled = value.replace(/\{\{\s*name\s*\}\}/gi, recipientName?.trim() || "there");
-  return sanitizeParam(filled);
+  return sanitizeParam(fillName(value, recipientName));
 }
 
 type SendResult = { ok: true; messageId: string | null } | { ok: false; error: string };
 
-async function sendTemplate(opts: {
+async function postMessage(
+  phoneNumberId: string,
+  accessToken: string,
+  payload: Record<string, unknown>
+): Promise<SendResult> {
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          ...payload,
+        }),
+      }
+    );
+
+    const data: any = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = data?.error;
+      const detail = err?.error_data?.details || err?.message || `HTTP ${res.status}`;
+      return { ok: false, error: `${err?.code ? `(${err.code}) ` : ""}${detail}`.slice(0, 500) };
+    }
+    return { ok: true, messageId: data?.messages?.[0]?.id ?? null };
+  } catch (e) {
+    return { ok: false, error: (e instanceof Error ? e.message : "Network error").slice(0, 500) };
+  }
+}
+
+function sendTemplate(opts: {
   phoneNumberId: string;
   accessToken: string;
   to: string;
@@ -58,35 +106,58 @@ async function sendTemplate(opts: {
     ];
   }
 
-  try {
-    const res = await fetch(
-      `https://graph.facebook.com/${GRAPH_VERSION}/${opts.phoneNumberId}/messages`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${opts.accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          to: opts.to,
-          type: "template",
-          template,
-        }),
-      }
-    );
+  return postMessage(opts.phoneNumberId, opts.accessToken, {
+    to: opts.to,
+    type: "template",
+    template,
+  });
+}
 
-    const data: any = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = data?.error;
-      const detail = err?.error_data?.details || err?.message || `HTTP ${res.status}`;
-      return { ok: false, error: `${err?.code ? `(${err.code}) ` : ""}${detail}`.slice(0, 500) };
+function sendText(opts: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  text: string;
+  recipientName: string | null;
+}): Promise<SendResult> {
+  return postMessage(opts.phoneNumberId, opts.accessToken, {
+    to: opts.to,
+    type: "text",
+    text: { body: fillName(opts.text, opts.recipientName).slice(0, 4000), preview_url: false },
+  });
+}
+
+/** Returns the set of phone numbers that sent us a message within the last 24 hours. */
+async function getRecipientsInsideWindow(userId: number, phones: string[]): Promise<Set<string>> {
+  const inside = new Set<string>();
+  if (phones.length === 0) return inside;
+
+  const rows = await db
+    .select({
+      waId: whatsappContacts.waId,
+      lastInbound: max(whatsappMessages.createdAt),
+    })
+    .from(whatsappMessages)
+    .innerJoin(whatsappConversations, eq(whatsappMessages.conversationId, whatsappConversations.id))
+    .innerJoin(whatsappContacts, eq(whatsappConversations.contactId, whatsappContacts.id))
+    .where(
+      and(
+        eq(whatsappMessages.userId, userId),
+        eq(whatsappMessages.direction, "inbound"),
+        inArray(whatsappContacts.waId, phones)
+      )
+    )
+    .groupBy(whatsappContacts.waId);
+
+  const now = Date.now();
+  for (const row of rows) {
+    if (!row.lastInbound) continue;
+    const last = new Date(row.lastInbound as any).getTime();
+    if (Number.isFinite(last) && now - last >= 0 && now - last < WINDOW_MS) {
+      inside.add(String(row.waId));
     }
-    return { ok: true, messageId: data?.messages?.[0]?.id ?? null };
-  } catch (e) {
-    return { ok: false, error: (e instanceof Error ? e.message : "Network error").slice(0, 500) };
   }
+  return inside;
 }
 
 export async function dispatchCampaign(campaignId: number): Promise<void> {
@@ -116,6 +187,7 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
   const parameters: string[] = Array.isArray(campaign.parameters)
     ? (campaign.parameters as string[])
     : [];
+  const customMessage = String((campaign as any).customMessage ?? "").trim();
 
   while (true) {
     // Stop if the user cancelled while we were sending
@@ -139,18 +211,43 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
 
     if (batch.length === 0) break;
 
+    const insideWindow = customMessage
+      ? await getRecipientsInsideWindow(
+          campaign.userId,
+          batch.map((r) => r.phoneNumber)
+        )
+      : new Set<string>();
+
     const results = await Promise.all(
-      batch.map((recipient) =>
-        sendTemplate({
-          phoneNumberId: conn.phoneNumberId,
-          accessToken,
-          to: recipient.phoneNumber,
-          templateName: campaign.templateName,
-          language: campaign.templateLanguage,
-          parameters,
-          recipientName: recipient.name,
-        })
-      )
+      batch.map(async (recipient): Promise<SendResult> => {
+        const sendAsTemplate = () =>
+          sendTemplate({
+            phoneNumberId: conn.phoneNumberId,
+            accessToken,
+            to: recipient.phoneNumber,
+            templateName: campaign.templateName,
+            language: campaign.templateLanguage,
+            parameters,
+            recipientName: recipient.name,
+          });
+
+        if (customMessage && insideWindow.has(recipient.phoneNumber)) {
+          const textResult = await sendText({
+            phoneNumberId: conn.phoneNumberId,
+            accessToken,
+            to: recipient.phoneNumber,
+            text: customMessage,
+            recipientName: recipient.name,
+          });
+          if (textResult.ok) return textResult;
+
+          // Window was actually closed (or similar) -> fall back to the template.
+          if (textResult.error.includes(OUTSIDE_WINDOW_CODE)) return sendAsTemplate();
+          return textResult;
+        }
+
+        return sendAsTemplate();
+      })
     );
 
     let sentCount = 0;
