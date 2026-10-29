@@ -43,8 +43,16 @@ export async function GET(
         description: products.description,
         price: products.price,
         brand: products.brand,
-        imageUrl: products.cleanImageUrl,
-        originalImageUrl: products.originalImageUrl,
+        companyName: products.companyName,
+        category: products.category,
+        subcategory: products.subcategory,
+        color: products.color,
+        features: products.features,
+        keywords: products.keywords,
+        hashtags: products.hashtags,
+        visibleText: products.visibleText,
+        metaDescription: products.metaDescription,
+        imageUrl: products.originalImageUrl,
       })
       .from(products)
       .where(and(eq(products.userId, user.id), eq(products.status, "done")))
@@ -59,10 +67,7 @@ export async function GET(
           city: user.city,
           website: user.website,
           logo: user.logo ? getUploadPublicPath(user.logo) : null,
-          products: catalog.map((product) => ({
-            ...product,
-            imageUrl: product.imageUrl || product.originalImageUrl,
-          })),
+          products: catalog,
         },
       },
       { headers: { "Cache-Control": "no-store" } },
