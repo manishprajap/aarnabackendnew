@@ -68,6 +68,16 @@ mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0010_w
 
 The authenticated `GET` and `PATCH /api/whatsapp/automation` endpoints return or update the current account's opt-in setting and business instructions; the API never returns the Gemini key.
 
+## WhatsApp campaigns
+
+Apply `drizzle/0011_whatsapp_campaigns.sql` to the production database before creating or listing campaigns. The campaign API uses these tables for quota checks, campaign records, and recipients; without them requests fail with a server error.
+
+```sh
+mysql --host="$DB_HOST" --user="$DB_USER" --password "$DB_NAME" < drizzle/0011_whatsapp_campaigns.sql
+```
+
+Back up the database before applying schema changes.
+
 The mobile app uses the local Next.js API at `http://localhost:3000/aarnexai-backend/api` during Vite development, and the production API in production builds. Set `VITE_API_BASE_URL` to override this (for example, on a physical phone use the development computer's LAN address instead of `localhost`). The backend allows the default Vite origin `http://localhost:5173`.
 
 ## YouTube and LinkedIn OAuth

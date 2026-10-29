@@ -1,0 +1,43 @@
+CREATE TABLE IF NOT EXISTS `whatsapp_campaigns` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `user_id` int NOT NULL,
+  `name` varchar(255) NOT NULL,
+  `template_id` varchar(100) NOT NULL,
+  `template_name` varchar(255) NOT NULL,
+  `template_language` varchar(20) NOT NULL DEFAULT 'en',
+  `parameters` json,
+  `status` varchar(30) NOT NULL DEFAULT 'draft',
+  `total` int NOT NULL DEFAULT 0,
+  `sent_count` int NOT NULL DEFAULT 0,
+  `delivered_count` int NOT NULL DEFAULT 0,
+  `read_count` int NOT NULL DEFAULT 0,
+  `failed_count` int NOT NULL DEFAULT 0,
+  `scheduled_at` timestamp NULL,
+  `opt_in_confirmed_at` timestamp NULL,
+  `started_at` timestamp NULL,
+  `completed_at` timestamp NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT `whatsapp_campaigns_id` PRIMARY KEY (`id`),
+  INDEX `whatsapp_campaigns_user_idx` (`user_id`),
+  INDEX `whatsapp_campaigns_user_created_idx` (`user_id`, `created_at`),
+  INDEX `whatsapp_campaigns_status_schedule_idx` (`status`, `scheduled_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `whatsapp_campaign_recipients` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `campaign_id` bigint NOT NULL,
+  `phone_number` varchar(50) NOT NULL,
+  `name` varchar(191),
+  `status` varchar(30) NOT NULL DEFAULT 'pending',
+  `wa_message_id` varchar(255),
+  `error_message` text,
+  `sent_at` timestamp NULL,
+  `delivered_at` timestamp NULL,
+  `read_at` timestamp NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT `whatsapp_campaign_recipients_id` PRIMARY KEY (`id`),
+  INDEX `whatsapp_campaign_recipients_campaign_status_idx` (`campaign_id`, `status`),
+  INDEX `whatsapp_campaign_recipients_wa_message_idx` (`wa_message_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
