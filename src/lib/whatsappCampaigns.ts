@@ -292,25 +292,37 @@ const RANK: Record<string, number> = { pending: 0, sent: 1, delivered: 2, read: 
 export async function applyDeliveryStatus(
   waMessageId: string,
   status: "sent" | "delivered" | "read" | "failed",
-  errorMessage?: string
-) {
+  errorMessage?: string,
+  eventDate = new Date()
+): Promise<boolean> {
   const r = whatsappCampaignRecipients;
   const [rec] = await db.select().from(r).where(eq(r.waMessageId, waMessageId)).limit(1);
-  if (!rec) return;
+  if (!rec) return false;
 
   // Webhooks can arrive out of order — never downgrade (e.g. read -> delivered).
-  if (status !== "failed" && (RANK[rec.status] ?? 0) >= RANK[status]) return;
+  const currentStatus = String(rec.status ?? "").toLowerCase();
+  if (
+    (status === "failed" && (currentStatus === "delivered" || currentStatus === "read")) ||
+    (status !== "failed" &&
+      RANK[currentStatus] !== undefined &&
+      RANK[currentStatus] >= RANK[status])
+  ) {
+    return true;
+  }
 
-  const now = new Date();
   await db
     .update(r)
     .set({
       status,
       errorMessage: status === "failed" ? (errorMessage ?? "Delivery failed").slice(0, 500) : null,
-      ...(status === "delivered" ? { deliveredAt: now } : {}),
-      ...(status === "read" ? { readAt: now, deliveredAt: rec.deliveredAt ?? now } : {}),
+      ...(status === "sent" ? { sentAt: eventDate } : {}),
+      ...(status === "delivered" ? { deliveredAt: eventDate } : {}),
+      ...(status === "read"
+        ? { readAt: eventDate, deliveredAt: rec.deliveredAt ?? eventDate }
+        : {}),
     })
     .where(eq(r.id, rec.id));
 
   await refreshCounters(rec.campaignId);
+  return true;
 }

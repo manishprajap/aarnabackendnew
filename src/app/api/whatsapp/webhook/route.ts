@@ -26,6 +26,7 @@ import {
   whatsappConversations,
   whatsappMessages,
 } from '@/db/schema';
+import { applyDeliveryStatus } from '@/lib/whatsappCampaigns';
 import { getActiveConnection, sendOutbound } from '@/lib/whatsapp-send';
 
 export const runtime = 'nodejs';
@@ -136,6 +137,10 @@ const STATUS_RANK: Record<string, number> = {
   read: 3,
 };
 const GEMINI_TEXT_MODEL = 'gemini-3.7-flash';
+
+function isMetaStatus(value: string): value is MetaStatus {
+  return Object.hasOwn(STATUS_RANK, value);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -261,7 +266,7 @@ async function applyStatusUpdate(
   const statusName = String(status?.status ?? '').toLowerCase();
   const errors = Array.isArray(status?.errors) ? status.errors : [];
 
-  if (!waMessageId || !Object.hasOwn(STATUS_RANK, statusName)) {
+  if (!waMessageId || !isMetaStatus(statusName)) {
     console.warn('[WhatsApp Webhook] Invalid status callback', {
       hasMessageId: Boolean(waMessageId),
       statusName,
@@ -300,6 +305,36 @@ async function applyStatusUpdate(
       .limit(2);
 
     if (matches.length === 0) {
+      const campaignErrorMessage =
+        statusName === 'failed'
+          ? errors
+              .map((error) =>
+                [
+                  error.code != null ? `Code ${error.code}` : '',
+                  error.title ?? error.message ?? '',
+                  error.error_data?.details ?? '',
+                ]
+                  .filter(Boolean)
+                  .join(': '),
+              )
+              .filter(Boolean)
+              .join('; ')
+          : undefined;
+
+      const isCampaignMessage = await applyDeliveryStatus(
+        waMessageId,
+        statusName,
+        campaignErrorMessage,
+        eventDate,
+      );
+      if (isCampaignMessage) {
+        console.info('[WhatsApp Webhook] Campaign message status updated:', {
+          waMessageId,
+          statusName,
+        });
+        return;
+      }
+
       if (attempt < 3) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         continue;
