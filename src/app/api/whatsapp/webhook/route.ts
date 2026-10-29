@@ -1,4 +1,3 @@
-
 /**
  * File: src/app/api/whatsapp/webhook/route.ts
  *
@@ -7,6 +6,7 @@
  * 2. Meta signature validation (POST)
  * 3. Outgoing message delivery statuses
  * 4. Incoming WhatsApp messages
+ * 5. AI auto-replies (run AFTER the 200 response, so Meta never times out)
  *
  * Important:
  * - Status updates use wa_message_id, not the connection's userId.
@@ -14,7 +14,7 @@
  *   are not assigned arbitrarily to one of those users.
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import { and, desc, eq, sql } from 'drizzle-orm';
@@ -31,6 +31,8 @@ import { getActiveConnection, sendOutbound } from '@/lib/whatsapp-send';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// Gives the background AI work enough time on serverless hosts.
+export const maxDuration = 60;
 
 type MetaStatus = 'sent' | 'delivered' | 'read' | 'failed';
 
@@ -130,13 +132,26 @@ type MetaWebhookBody = {
   }>;
 };
 
+type AutoReplyJob = {
+  userId: number;
+  conversationId: number;
+  sender: string;
+  messageTimestamp: number;
+  instructions: string | null;
+};
+
 const STATUS_RANK: Record<string, number> = {
   failed: 0,
   sent: 1,
   delivered: 2,
   read: 3,
 };
-const GEMINI_TEXT_MODEL = 'gemini-3.7-flash';
+
+// Override with GEMINI_TEXT_MODEL in the server environment if needed.
+const GEMINI_TEXT_MODEL =
+  (process.env.GEMINI_TEXT_MODEL ?? '').trim() || 'gemini-2.5-flash';
+
+const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 function isMetaStatus(value: string): value is MetaStatus {
   return Object.hasOwn(STATUS_RANK, value);
@@ -415,7 +430,6 @@ async function applyStatusUpdate(
             .join('; ')
         : 'WhatsApp message delivery failed; Meta did not include error details';
 
-      // Store the raw structured error as well in server logs, without tokens.
       console.error('[WhatsApp Webhook] Persisting failed message status:', {
         messageRowId: message.id,
         userId: message.userId,
@@ -621,6 +635,10 @@ async function saveIncomingMessage(params: {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/* Gemini auto-reply                                                          */
+/* -------------------------------------------------------------------------- */
+
 async function generateAutoReply(params: {
   userId: number;
   conversationId: number;
@@ -633,6 +651,7 @@ async function generateAutoReply(params: {
     .select({
       direction: whatsappMessages.direction,
       text: whatsappMessages.text,
+      status: whatsappMessages.status,
     })
     .from(whatsappMessages)
     .where(
@@ -642,18 +661,43 @@ async function generateAutoReply(params: {
       ),
     )
     .orderBy(desc(whatsappMessages.id))
-    .limit(10);
+    .limit(12);
 
-  const contents = history
+  // Keep only real text turns. Failed sends and "[Template] ..." placeholders
+  // are not useful conversation context for the model.
+  const turns = history
     .reverse()
-    .filter((message) => typeof message.text === 'string' && message.text.trim())
+    .filter(
+      (message) =>
+        typeof message.text === 'string' &&
+        message.text.trim() &&
+        message.status !== 'failed' &&
+        !/^\s*\[template\]/i.test(message.text),
+    )
     .map((message) => ({
-      role: message.direction === 'outbound' ? 'model' : 'user',
-      parts: [{ text: String(message.text).slice(0, 2000) }],
+      role: (message.direction === 'outbound' ? 'model' : 'user') as
+        | 'model'
+        | 'user',
+      text: String(message.text).slice(0, 2000),
     }));
 
-  if (contents.length === 0) {
-    throw new Error('No text messages are available for an AI reply');
+  // Gemini expects the conversation to start with a user turn and to alternate
+  // roles, so merge consecutive same-role messages and drop leading model turns.
+  const contents: Array<{ role: 'model' | 'user'; parts: Array<{ text: string }> }> = [];
+  for (const turn of turns) {
+    const last = contents[contents.length - 1];
+    if (last && last.role === turn.role) {
+      last.parts[0].text += `\n${turn.text}`;
+    } else {
+      contents.push({ role: turn.role, parts: [{ text: turn.text }] });
+    }
+  }
+  while (contents.length > 0 && contents[0].role !== 'user') {
+    contents.shift();
+  }
+
+  if (contents.length === 0 || contents[contents.length - 1].role !== 'user') {
+    throw new Error('No customer text message is available for an AI reply');
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -665,7 +709,9 @@ async function generateAutoReply(params: {
 
 Business instructions (trusted configuration):
 ${(params.instructions ?? '').trim() || 'No business-specific details have been provided. Ask for clarification rather than guessing.'}`,
-      maxOutputTokens: 300,
+      // Generous limit so internal model "thinking" tokens can never leave the
+      // visible reply empty or cut off.
+      maxOutputTokens: 1024,
       temperature: 0.4,
     },
   });
@@ -673,6 +719,54 @@ ${(params.instructions ?? '').trim() || 'No business-specific details have been 
   const text = result.text?.trim();
   if (!text) throw new Error('Gemini returned an empty WhatsApp reply');
   return text.slice(0, 4000);
+}
+
+/**
+ * Runs after the webhook response has been sent to Meta.
+ * Each job is isolated: one failure never blocks the next.
+ */
+async function processAutoReplyJobs(jobs: AutoReplyJob[]): Promise<void> {
+  for (const job of jobs) {
+    const { userId, conversationId, sender, messageTimestamp, instructions } = job;
+
+    try {
+      const reply = await generateAutoReply({
+        userId,
+        conversationId,
+        instructions,
+      });
+
+      if (Date.now() - messageTimestamp * 1000 >= CUSTOMER_SERVICE_WINDOW_MS) {
+        console.info(
+          '[WhatsApp Webhook] Skipping AI reply because the customer service window expired during generation:',
+          { userId, conversationId },
+        );
+        continue;
+      }
+
+      const activeConnection = await getActiveConnection(userId);
+
+      await sendOutbound({
+        userId,
+        conversationId,
+        connection: activeConnection,
+        to: sender,
+        text: reply,
+      });
+
+      console.info('[WhatsApp Webhook] AI reply sent:', {
+        userId,
+        conversationId,
+      });
+    } catch (error) {
+      console.error('[WhatsApp Webhook] AI auto-reply failed:', {
+        userId,
+        conversationId,
+        model: GEMINI_TEXT_MODEL,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -686,14 +780,19 @@ export async function GET(request: NextRequest) {
   const verifyToken = searchParams.get('hub.verify_token');
   const challenge = searchParams.get('hub.challenge');
 
-  const expectedToken =
-    process.env.WHATSAPP_VERIFY_TOKEN ??
-    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN ??
-    process.env.META_WEBHOOK_VERIFY_TOKEN;
+  // Accept any of the configured token variables so the app-level webhook and
+  // the phone-level override (which uses WHATSAPP_WEBHOOK_VERIFY_TOKEN) both pass.
+  const expectedTokens = [
+    process.env.WHATSAPP_VERIFY_TOKEN,
+    process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN,
+    process.env.META_WEBHOOK_VERIFY_TOKEN,
+  ]
+    .map((token) => (token ?? '').trim())
+    .filter(Boolean);
 
-  if (!expectedToken) {
+  if (expectedTokens.length === 0) {
     console.error(
-      '[WhatsApp Webhook] WHATSAPP_VERIFY_TOKEN is not configured',
+      '[WhatsApp Webhook] No webhook verify token is configured',
     );
     return new NextResponse('Webhook verification is not configured', {
       status: 500,
@@ -702,7 +801,8 @@ export async function GET(request: NextRequest) {
 
   if (
     mode === 'subscribe' &&
-    verifyToken === expectedToken &&
+    verifyToken !== null &&
+    expectedTokens.includes(verifyToken) &&
     challenge !== null
   ) {
     console.info('[WhatsApp Webhook] Verification successful');
@@ -743,6 +843,8 @@ export async function POST(request: NextRequest) {
       // Acknowledge unrelated webhook objects without processing them.
       return NextResponse.json({ success: true, ignored: true });
     }
+
+    const autoReplyJobs: AutoReplyJob[] = [];
 
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {
@@ -839,8 +941,8 @@ export async function POST(request: NextRequest) {
             '[WhatsApp Webhook] Multiple active connections for the same phone number; incoming messages skipped:',
             {
               phoneNumberId,
-              connectionIds: matchingConnections.map((row) => row.id),
-              userIds: matchingConnections.map((row) => row.userId),
+              connectionIds: matchingConnections.map((row: { id: any; }) => row.id),
+              userIds: matchingConnections.map((row: { userId: any; }) => row.userId),
             },
           );
           continue;
@@ -883,58 +985,30 @@ export async function POST(request: NextRequest) {
 
             const messageTimestamp = Number(message.timestamp);
             if (!Number.isFinite(messageTimestamp) || messageTimestamp <= 0) {
-              console.info('[WhatsApp Webhook] Skipping AI reply for a message without a valid timestamp:', {
-                userId,
-                conversationId: saved.conversationId,
-              });
+              console.info(
+                '[WhatsApp Webhook] Skipping AI reply for a message without a valid timestamp:',
+                { userId, conversationId: saved.conversationId },
+              );
               continue;
             }
 
             const ageMs = Date.now() - messageTimestamp * 1000;
-            if (ageMs < 0 || ageMs >= 24 * 60 * 60 * 1000) {
-              console.info('[WhatsApp Webhook] Skipping AI reply outside the customer service window:', {
-                userId,
-                conversationId: saved.conversationId,
-              });
+            if (ageMs < 0 || ageMs >= CUSTOMER_SERVICE_WINDOW_MS) {
+              console.info(
+                '[WhatsApp Webhook] Skipping AI reply outside the customer service window:',
+                { userId, conversationId: saved.conversationId },
+              );
               continue;
             }
 
-            try {
-              const reply = await generateAutoReply({
-                userId,
-                conversationId: saved.conversationId,
-                instructions: connection.aiInstructions,
-              });
-
-              if (Date.now() - messageTimestamp * 1000 >= 24 * 60 * 60 * 1000) {
-                console.info('[WhatsApp Webhook] Skipping AI reply because the customer service window expired during generation:', {
-                  userId,
-                  conversationId: saved.conversationId,
-                });
-                continue;
-              }
-
-              const activeConnection = await getActiveConnection(userId);
-
-              await sendOutbound({
-                userId,
-                conversationId: saved.conversationId,
-                connection: activeConnection,
-                to: saved.sender,
-                text: reply,
-              });
-
-              console.info('[WhatsApp Webhook] AI reply sent:', {
-                userId,
-                conversationId: saved.conversationId,
-              });
-            } catch (error) {
-              console.error('[WhatsApp Webhook] AI auto-reply failed:', {
-                userId,
-                conversationId: saved.conversationId,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
+            // Queue the AI reply; it runs after the 200 response is sent.
+            autoReplyJobs.push({
+              userId,
+              conversationId: saved.conversationId,
+              sender: saved.sender,
+              messageTimestamp,
+              instructions: connection.aiInstructions,
+            });
           } catch (error) {
             console.error(
               '[WhatsApp Webhook] Failed to save incoming message:',
@@ -950,7 +1024,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Meta expects a successful response to acknowledge delivery.
+    if (autoReplyJobs.length > 0) {
+      console.info('[WhatsApp Webhook] Queued AI replies:', {
+        count: autoReplyJobs.length,
+      });
+      after(() => processAutoReplyJobs(autoReplyJobs));
+    }
+
+    // Meta expects a fast successful response to acknowledge delivery.
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
     console.error('[WhatsApp Webhook] Unexpected processing error:', error);
