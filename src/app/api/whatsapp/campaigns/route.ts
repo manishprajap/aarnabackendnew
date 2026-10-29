@@ -1,4 +1,4 @@
-import { NextRequest } from "next/server";
+import { NextRequest, after } from "next/server"; // `after` requires Next.js 15+
 import { db } from "@/db";
 import { whatsappCampaigns, whatsappCampaignRecipients } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
@@ -9,13 +9,30 @@ import {
   computeQuota,
   normalizePhone,
   serializeCampaign,
-  dispatchCampaign,
   getActiveConnection,
   getAccessToken,
   fetchTemplate,
 } from "@/lib/whatsappCampaigns";
+import { dispatchCampaign } from "@/lib/whatsappCampaignDispatch";
 
 export const dynamic = "force-dynamic";
+// Keep the function alive long enough to finish sending (Vercel etc.)
+export const maxDuration = 300;
+
+/** Highest {{n}} placeholder in a template body. */
+function countPlaceholders(text?: string | null): number {
+  const nums = Array.from((text ?? "").matchAll(/\{\{\s*(\d+)\s*\}\}/g)).map((m) => Number(m[1]));
+  return nums.length ? Math.max(...nums) : 0;
+}
+
+/** Works whether fetchTemplate returns bodyText or raw Meta `components`. */
+function templateBody(template: any): string {
+  if (typeof template?.bodyText === "string") return template.bodyText;
+  const body = Array.isArray(template?.components)
+    ? template.components.find((c: any) => String(c?.type).toUpperCase() === "BODY")
+    : null;
+  return typeof body?.text === "string" ? body.text : "";
+}
 
 /* GET /api/whatsapp/campaigns */
 export async function GET(request: NextRequest) {
@@ -95,6 +112,17 @@ export async function POST(request: NextRequest) {
       return fail("Only approved templates can be used for campaigns");
     }
 
+    // The number of values must match the template, otherwise Meta rejects every message (error 132000).
+    const expected = countPlaceholders(templateBody(template));
+    const cleanedParams: string[] = parameters.map((p: string) => p.trim());
+    if (cleanedParams.length !== expected || cleanedParams.some((p) => !p)) {
+      return fail(
+        expected === 0
+          ? "This template has no variables. Remove the template values."
+          : `This template needs ${expected} value${expected === 1 ? "" : "s"}. Fill in all of them.`
+      );
+    }
+
     /* ---------- plan quota ---------- */
     const quota = await computeQuota(userId);
     if (quota.activeLimit !== null && quota.activeCount >= quota.activeLimit) {
@@ -119,7 +147,7 @@ export async function POST(request: NextRequest) {
         templateId: String(templateId),
         templateName: template.name,
         templateLanguage: template.language,
-        parameters,
+        parameters: cleanedParams,
         status: scheduleDate ? "scheduled" : "sending",
         total: cleaned.length,
         scheduledAt: scheduleDate,
@@ -146,9 +174,16 @@ export async function POST(request: NextRequest) {
       .where(eq(whatsappCampaigns.id, campaignId))
       .limit(1);
 
-    // Send immediately (fire-and-forget). Scheduled campaigns are picked up by the cron route.
+    // Send immediately, but keep the serverless function alive until sending finishes.
+    // Scheduled campaigns are picked up by the cron route.
     if (!scheduleDate) {
-      dispatchCampaign(campaignId).catch((err) => console.error("[Campaign dispatch]", err));
+      after(async () => {
+        try {
+          await dispatchCampaign(campaignId);
+        } catch (err) {
+          console.error("[Campaign dispatch]", err);
+        }
+      });
     }
 
     return ok(serializeCampaign(campaign), 201);
