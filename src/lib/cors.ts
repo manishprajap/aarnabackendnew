@@ -5,6 +5,7 @@
  */
 const ALLOWED_ORIGINS = [
   'http://localhost:8100',   // ionic serve (browser dev)
+  'http://localhost:5173',   // Vite browser dev
   'https://localhost',       // Capacitor Android (v6+ default)
   'http://localhost',        // Capacitor Android (androidScheme: 'http' / purane versions)
   'capacitor://localhost',   // Capacitor iOS

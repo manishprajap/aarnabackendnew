@@ -1,3 +1,4 @@
+// src/app/api/whatsapp/callback/route.ts
 // Meta redirects here after "Get started".
 // Verifies the signed session, links + subscribes + registers the number
 // automatically, then sends the user back to the app.

@@ -1,11 +1,16 @@
 // src/app/api/whatsapp/connect/route.ts
+// Embedded Signup finish: the client sends the Meta `code`, `wabaId` and
+// `phoneNumberId` it got from the user's OWN signup. Auth is either the app's
+// bearer token or the signed WhatsApp onboarding session (used by the hosted
+// mobile page, which has no bearer token).
 import { NextRequest, NextResponse } from 'next/server';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 import { db } from '@/db';
 import { whatsappConnections } from '@/db/schema';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
+import { verifyWhatsAppSession } from '@/lib/whatsappSession';
 import { ensurePhoneRegistered, subscribeWabaToApp } from '@/lib/whatsapp-register';
 
 export const runtime = 'nodejs';
@@ -43,14 +48,27 @@ export async function POST(req: NextRequest) {
   const origin = req.headers.get('origin');
 
   try {
-    /* AUTH */
-    const userId = Number(await getUserIdFromRequest(req));
+    const body = await req.json().catch(() => ({}));
+
+    /* AUTH: signed onboarding session OR app bearer token */
+    let userId: number;
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+
+    if (sessionId) {
+      try {
+        userId = Number(verifyWhatsAppSession(sessionId).userId);
+      } catch {
+        return jsonError(origin, 'WhatsApp connection session is invalid or expired.', 401);
+      }
+    } else {
+      userId = Number(await getUserIdFromRequest(req));
+    }
+
     if (!Number.isSafeInteger(userId) || userId <= 0) {
       return jsonError(origin, 'Authenticated user was not found.', 401);
     }
 
     /* REQUEST */
-    const body = await req.json().catch(() => ({}));
     const code = typeof body.code === 'string' ? body.code.trim() : '';
     const wabaId = typeof body.wabaId === 'string' ? body.wabaId.trim() : '';
     let phoneNumberId =
@@ -86,7 +104,7 @@ export async function POST(req: NextRequest) {
 
     const accessToken: string = tokenData.access_token;
 
-    /* 2. WABA */
+    /* 2. WABA: looked up with THIS user's token, so it proves they can access it */
     const waba = await graphGet(`${encodeURIComponent(wabaId)}?fields=id,name`, accessToken);
     if (!waba.ok || !waba.data.id) {
       console.error('[WhatsApp] WABA lookup failed:', waba.data?.error);
@@ -96,23 +114,43 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    /* 3. Discover phone number if the client did not send one */
-    if (!phoneNumberId) {
-      const list = await graphGet(
-        `${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`,
-        accessToken
+    /* 2b. A WABA can belong to one app user only */
+    const wabaTaken = await db
+      .select({ id: whatsappConnections.id })
+      .from(whatsappConnections)
+      .where(and(eq(whatsappConnections.wabaId, wabaId), ne(whatsappConnections.userId, userId)))
+      .limit(1);
+
+    if (wabaTaken.length > 0) {
+      return jsonError(
+        origin,
+        'This WhatsApp Business Account is already connected to another user.',
+        409
       );
+    }
 
-      if (!list.ok || !Array.isArray(list.data.data) || list.data.data.length === 0) {
-        return jsonError(
-          origin,
-          list.data?.error?.message ||
-            'No WhatsApp phone number was found under this WABA.'
-        );
+    /* 3. Phone numbers under this WABA; the chosen one must be among them */
+    const list = await graphGet(
+      `${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`,
+      accessToken
+    );
+
+    if (!list.ok || !Array.isArray(list.data.data) || list.data.data.length === 0) {
+      return jsonError(
+        origin,
+        list.data?.error?.message || 'No WhatsApp phone number was found under this WABA.'
+      );
+    }
+
+    const phones = list.data.data as Array<{ id: string }>;
+
+    if (phoneNumberId) {
+      if (!phones.some((p) => String(p.id) === phoneNumberId)) {
+        return jsonError(origin, 'This phone number does not belong to the WhatsApp account.');
       }
-
+    } else {
       // If several numbers exist, let the user choose one in a future version.
-      phoneNumberId = String(list.data.data[0].id);
+      phoneNumberId = String(phones[0].id);
     }
 
     /* 4. Phone details */
@@ -128,13 +166,35 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    /* 4b. A phone number can belong to one app user only */
+    const phoneTaken = await db
+      .select({ id: whatsappConnections.id })
+      .from(whatsappConnections)
+      .where(
+        and(
+          eq(whatsappConnections.phoneNumberId, phoneNumberId),
+          ne(whatsappConnections.userId, userId)
+        )
+      )
+      .limit(1);
+
+    if (phoneTaken.length > 0) {
+      return jsonError(
+        origin,
+        'This WhatsApp phone number is already connected to another user.',
+        409
+      );
+    }
+
     /* 5. Subscribe WABA to the app (webhooks) */
     try {
       await subscribeWabaToApp(wabaId, accessToken);
     } catch (e) {
       return jsonError(
         origin,
-        e instanceof Error ? e.message : 'Unable to subscribe WhatsApp Business Account to the app.'
+        e instanceof Error
+          ? e.message
+          : 'Unable to subscribe WhatsApp Business Account to the app.'
       );
     }
 
@@ -163,9 +223,7 @@ export async function POST(req: NextRequest) {
       await db.insert(whatsappConnections).values({ userId, ...connectionData });
     }
 
-    /* 7. Auto-register for Cloud API (non-fatal).
-          If the number is already CONNECTED (for example a Coexistence number)
-          ensurePhoneRegistered skips /register completely. */
+    /* 7. Auto-register for Cloud API (non-fatal) */
     let registered = false;
     let activationMessage: string | null = null;
 
