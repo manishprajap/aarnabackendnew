@@ -19,6 +19,8 @@ export const dynamic = "force-dynamic";
 // Keep the function alive long enough to finish sending (Vercel etc.)
 export const maxDuration = 300;
 
+const MAX_CUSTOM_MESSAGE_LENGTH = 1000;
+
 /** Highest {{n}} placeholder in a template body. */
 function countPlaceholders(text?: string | null): number {
   const nums = Array.from((text ?? "").matchAll(/\{\{\s*(\d+)\s*\}\}/g)).map((m) => Number(m[1]));
@@ -66,7 +68,15 @@ export async function POST(request: NextRequest) {
       return fail("Invalid JSON body");
     }
 
-    const { name, templateId, parameters = [], recipients, scheduledAt, optInConfirmed } = body ?? {};
+    const {
+      name,
+      templateId,
+      parameters = [],
+      customMessage,
+      recipients,
+      scheduledAt,
+      optInConfirmed,
+    } = body ?? {};
 
     /* ---------- validation ---------- */
     if (!name || typeof name !== "string" || !name.trim()) return fail("Campaign name is required");
@@ -79,9 +89,18 @@ export async function POST(request: NextRequest) {
     if (!Array.isArray(parameters) || parameters.some((p) => typeof p !== "string")) {
       return fail("parameters must be an array of strings");
     }
+    if (customMessage !== undefined && customMessage !== null && typeof customMessage !== "string") {
+      return fail("customMessage must be a string");
+    }
+    if (typeof customMessage === "string" && customMessage.trim().length > MAX_CUSTOM_MESSAGE_LENGTH) {
+      return fail(`Custom message must be ${MAX_CUSTOM_MESSAGE_LENGTH} characters or fewer`);
+    }
     if (!Array.isArray(recipients) || recipients.length === 0) {
       return fail("At least one recipient is required");
     }
+
+    const cleanedCustomMessage: string | null =
+      typeof customMessage === "string" && customMessage.trim() ? customMessage.trim() : null;
 
     let scheduleDate: Date | null = null;
     if (scheduledAt) {
@@ -147,7 +166,7 @@ export async function POST(request: NextRequest) {
         templateName: template.name,
         templateLanguage: template.language,
         parameters: cleanedParams,
-        customMessage: null,
+        customMessage: cleanedCustomMessage,
         status: scheduleDate ? "scheduled" : "sending",
         total: cleaned.length,
         scheduledAt: scheduleDate,

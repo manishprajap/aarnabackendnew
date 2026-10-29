@@ -5,13 +5,21 @@
  *
  * - Every recipient receives the Meta-approved TEMPLATE (works inside and outside
  *   the 24h window, exactly like WATI / Interakt / AiSensy campaigns).
- * - {{name}} inside any template parameter is replaced with the recipient's name.
+ * - If the campaign has a `customMessage` AND the recipient messaged this business in
+ *   the last 24 hours, the custom message is sent as a free follow-up AFTER the template.
+ * - {{name}} works in both the template parameters and the custom message.
  * - Counters are recomputed with refreshCounters() so they stay consistent with
  *   the webhook (delivered / read updates).
  */
 import { db } from "@/db";
-import { whatsappCampaigns, whatsappCampaignRecipients } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
+import {
+  whatsappCampaigns,
+  whatsappCampaignRecipients,
+  whatsappContacts,
+  whatsappConversations,
+  whatsappMessages,
+} from "@/db/schema";
+import { and, eq, inArray, max } from "drizzle-orm";
 import {
   GRAPH_URL,
   getActiveConnection,
@@ -20,6 +28,7 @@ import {
 } from "@/lib/whatsappCampaigns";
 
 const CONCURRENCY = 10;
+const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -104,6 +113,53 @@ function sendTemplate(opts: {
   });
 }
 
+function sendText(opts: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  text: string;
+  recipientName: string | null;
+}): Promise<SendResult> {
+  return postMessage(opts.phoneNumberId, opts.accessToken, {
+    to: opts.to,
+    type: "text",
+    text: { body: fillName(opts.text, opts.recipientName).slice(0, 4000), preview_url: false },
+  });
+}
+
+/** Returns the phone numbers that sent this business a message within the last 24 hours. */
+async function getRecipientsInsideWindow(userId: number, phones: string[]): Promise<Set<string>> {
+  const inside = new Set<string>();
+  if (phones.length === 0) return inside;
+
+  const rows = await db
+    .select({
+      waId: whatsappContacts.waId,
+      lastInbound: max(whatsappMessages.createdAt),
+    })
+    .from(whatsappMessages)
+    .innerJoin(whatsappConversations, eq(whatsappMessages.conversationId, whatsappConversations.id))
+    .innerJoin(whatsappContacts, eq(whatsappConversations.contactId, whatsappContacts.id))
+    .where(
+      and(
+        eq(whatsappMessages.userId, userId),
+        eq(whatsappMessages.direction, "inbound"),
+        inArray(whatsappContacts.waId, phones)
+      )
+    )
+    .groupBy(whatsappContacts.waId);
+
+  const now = Date.now();
+  for (const row of rows) {
+    if (!row.lastInbound) continue;
+    const last = new Date(row.lastInbound as any).getTime();
+    if (Number.isFinite(last) && now - last >= 0 && now - last < WINDOW_MS) {
+      inside.add(String(row.waId));
+    }
+  }
+  return inside;
+}
+
 export async function dispatchCampaign(campaignId: number): Promise<void> {
   const c = whatsappCampaigns;
   const r = whatsappCampaignRecipients;
@@ -127,6 +183,7 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
   const parameters: string[] = Array.isArray(campaign.parameters)
     ? (campaign.parameters as string[])
     : [];
+  const customMessage = (campaign.customMessage ?? "").trim();
 
   while (true) {
     // Stop if the user cancelled while we were sending
@@ -145,19 +202,43 @@ export async function dispatchCampaign(campaignId: number): Promise<void> {
 
     if (batch.length === 0) break;
 
+    const insideWindow = customMessage
+      ? await getRecipientsInsideWindow(
+          campaign.userId,
+          batch.map((rec) => rec.phoneNumber)
+        )
+      : new Set<string>();
+
     const results = await Promise.all(
-      batch.map(
-        (recipient): Promise<SendResult> =>
-          sendTemplate({
+      batch.map(async (recipient): Promise<SendResult> => {
+        // 1) Template always goes first, to everyone.
+        const templateResult = await sendTemplate({
+          phoneNumberId: conn.phoneNumberId,
+          accessToken,
+          to: recipient.phoneNumber,
+          templateName: campaign.templateName,
+          language: campaign.templateLanguage,
+          parameters,
+          recipientName: recipient.name,
+        });
+
+        // 2) Optional free follow-up, only inside the 24h customer service window.
+        //    A failed follow-up never marks the recipient as failed (the template was delivered).
+        if (templateResult.ok && customMessage && insideWindow.has(recipient.phoneNumber)) {
+          const followUp = await sendText({
             phoneNumberId: conn.phoneNumberId,
             accessToken,
             to: recipient.phoneNumber,
-            templateName: campaign.templateName,
-            language: campaign.templateLanguage,
-            parameters,
+            text: customMessage,
             recipientName: recipient.name,
-          })
-      )
+          });
+          if (!followUp.ok) {
+            console.warn("[Campaign follow-up failed]", recipient.phoneNumber, followUp.error);
+          }
+        }
+
+        return templateResult;
+      })
     );
 
     for (let i = 0; i < batch.length; i++) {
