@@ -8,6 +8,7 @@ import { users, categories } from '@/db/schema';
 import { verifyToken } from '@/lib/auth';
 import { corsHeaders } from '@/lib/cors';
 import { getUploadStoragePath } from '@/lib/uploadStorage';
+import { ensureBusinessSlug, ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 export const runtime = 'nodejs';
 
@@ -114,6 +115,7 @@ export async function POST(req: NextRequest) {
 
     const updateData: Partial<typeof users.$inferInsert> = {
       name,
+      businessName: name,
       business_category: businessCategory,
       businessCategoryId: cat.id,
       city,
@@ -152,10 +154,12 @@ export async function POST(req: NextRequest) {
       updateData.logo = filename;
     }
 
+    await ensureBusinessWebsiteSchema();
     await db
       .update(users)
       .set(updateData)
       .where(eq(users.id, payload.userId));
+    const publicSlug = await ensureBusinessSlug(payload.userId, name);
 
     const [updatedUser] = await db
       .select({
@@ -176,7 +180,7 @@ export async function POST(req: NextRequest) {
       .where(eq(users.id, payload.userId))
       .limit(1);
 
-    return NextResponse.json({ user: updatedUser });
+    return NextResponse.json({ user: { ...updatedUser, publicSlug } });
   } catch (err) {
     console.error('Business setup error:', err);
     return NextResponse.json(

@@ -6,7 +6,8 @@ import { users, subscriptions, plans, industries, businessCategories } from '@/d
 import { verifyToken } from '@/lib/auth';
 import { getSubscriptionAccess } from '@/lib/subscriptionAccess';
 import { ensureColumns } from '@/lib/onboarding';
-import { isPaidSubscriptionPlan } from '@/lib/whatsappCampaigns';
+import { getPlan } from '@/lib/whatsappCampaigns';
+import { ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 export const runtime = 'nodejs';
 
@@ -46,6 +47,7 @@ export async function GET(req: NextRequest) {
     }
 
     await ensureColumns('users', { banner_language: "VARCHAR(16) NOT NULL DEFAULT 'English'" });
+    await ensureBusinessWebsiteSchema();
 
     const [row] = await db
       .select({
@@ -93,6 +95,7 @@ export async function GET(req: NextRequest) {
         and(
           eq(subscriptions.userId, row.id),
           eq(subscriptions.status, 'active'),
+          eq(plans.planType, 'ai'),
           gte(subscriptions.endDate, new Date())
         )
       )
@@ -108,10 +111,7 @@ export async function GET(req: NextRequest) {
     const daysRemaining = activeSub?.endDate
       ? Math.max(0, Math.ceil((activeSub.endDate.getTime() - Date.now()) / 86_400_000))
       : null;
-    const isPaidPlan = Boolean(
-      activeSub &&
-      isPaidSubscriptionPlan(activeSub.planName, activeSub.planPrice)
-    );
+    const isPaidPlan = (await getPlan(row.id)) === 'pro';
 
     return json({
       user: {

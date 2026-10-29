@@ -3,14 +3,16 @@ import { and, asc, eq, gte, isNull, lte, or } from 'drizzle-orm';
 
 import { db } from '@/db';
 import { coupons, plans } from '@/db/schema';
+import { ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 export async function GET() {
   try {
+    await ensureBusinessWebsiteSchema();
     const now = new Date();
     const activePlans = await db
       .select()
       .from(plans)
-      .where(eq(plans.isActive, true))
+      .where(and(eq(plans.isActive, true), eq(plans.planType, 'ai')))
       .orderBy(asc(plans.price));
     const activeCoupons = await db
       .select({

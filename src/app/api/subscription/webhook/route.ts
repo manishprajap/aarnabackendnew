@@ -14,8 +14,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { db } from '@/db';
 import { plans, subscriptions, transactions, users } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray } from 'drizzle-orm';
 import { corsHeaders } from '@/lib/cors';
+import { ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status, headers: corsHeaders() });
@@ -26,6 +27,7 @@ export async function OPTIONS() {
 }
 
 export async function POST(req: NextRequest) {
+  await ensureBusinessWebsiteSchema();
   const rawBody = await req.text();
   const signature = req.headers.get('x-razorpay-signature');
 
@@ -81,7 +83,25 @@ export async function POST(req: NextRequest) {
       return json({ received: true });
     }
 
-    const startDate = new Date();
+    const now = new Date();
+    const [activePeriod] = plan.planType === 'website'
+      ? await db
+          .select({ endDate: subscriptions.endDate })
+          .from(subscriptions)
+          .innerJoin(plans, eq(subscriptions.planId, plans.id))
+          .where(and(
+            eq(subscriptions.userId, existingTransaction.userId),
+            eq(subscriptions.status, 'active'),
+            eq(plans.planType, 'website'),
+            gte(subscriptions.endDate, now),
+          ))
+          .orderBy(desc(subscriptions.endDate))
+          .limit(1)
+      : [];
+    const startDate =
+      plan.planType === 'website' && activePeriod?.endDate && activePeriod.endDate > now
+        ? activePeriod.endDate
+        : now;
     const endDate = new Date(startDate);
     endDate.setDate(endDate.getDate() + plan.durationDays);
 
@@ -95,16 +115,33 @@ export async function POST(req: NextRequest) {
       .where(eq(transactions.id, existingTransaction.id));
 
     if (existingTransaction.subscriptionId) {
+      const activeIds = await db
+        .select({ id: subscriptions.id })
+        .from(subscriptions)
+        .innerJoin(plans, eq(subscriptions.planId, plans.id))
+        .where(and(
+          eq(subscriptions.userId, existingTransaction.userId),
+          eq(subscriptions.status, 'active'),
+          eq(plans.planType, plan.planType),
+        ));
+      if (activeIds.length) {
+        await db
+          .update(subscriptions)
+          .set({ status: 'cancelled', updatedAt: new Date() })
+          .where(inArray(subscriptions.id, activeIds.map(({ id }) => id)));
+      }
       await db
         .update(subscriptions)
         .set({ status: 'active', startDate, endDate })
         .where(eq(subscriptions.id, existingTransaction.subscriptionId));
     }
 
-    await db
-      .update(users)
-      .set({ plan: plan.name, credits: plan.posters })
-      .where(eq(users.id, existingTransaction.userId));
+    if (plan.planType === 'ai') {
+      await db
+        .update(users)
+        .set({ plan: plan.name, credits: plan.posters })
+        .where(eq(users.id, existingTransaction.userId));
+    }
   }
 
   if (eventType === 'payment.failed') {

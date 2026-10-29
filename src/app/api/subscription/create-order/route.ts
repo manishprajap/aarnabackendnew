@@ -8,6 +8,7 @@ import { corsHeaders } from '@/lib/cors';
 import { getRazorpayConfig } from '@/lib/razorpay';
 import { getUserIdFromRequest, AuthError } from '@/lib/auth';
 import { CouponValidationError, getValidCouponDiscount } from '@/lib/coupons';
+import { ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 // Wraps NextResponse.json so every response — not just OPTIONS — carries
 // the CORS headers.
@@ -21,6 +22,7 @@ export async function OPTIONS() {
 
 export async function POST(req: NextRequest) {
   try {
+    await ensureBusinessWebsiteSchema();
     // await is harmless if the function is sync, and required if it is async.
     const userId = Number(await getUserIdFromRequest(req));
     const { razorpay, razorpayKeyId } = getRazorpayConfig();
@@ -36,7 +38,11 @@ export async function POST(req: NextRequest) {
     const [plan] = await db
       .select()
       .from(plans)
-      .where(and(eq(plans.id, planId), eq(plans.isActive, true)))
+      .where(and(
+        eq(plans.id, planId),
+        eq(plans.isActive, true),
+        eq(plans.planType, 'ai'),
+      ))
       .limit(1);
 
     if (!plan) {

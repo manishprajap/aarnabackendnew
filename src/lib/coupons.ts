@@ -1,7 +1,8 @@
-import { and, eq, lte, or, isNull, gte } from 'drizzle-orm';
+import { and, eq, gte, isNull, lte, or } from 'drizzle-orm';
 
 import { db } from '@/db';
 import { coupons, plans } from '@/db/schema';
+import { ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 export class CouponValidationError extends Error {
   constructor(message: string) {
@@ -15,13 +16,18 @@ export async function getValidCouponDiscount(
   rawCode: unknown,
   now = new Date()
 ) {
+  await ensureBusinessWebsiteSchema();
   const code = typeof rawCode === 'string' ? rawCode.trim().toUpperCase() : '';
   if (!code) return { coupon: null, discountPaise: 0 };
 
   const [plan] = await db
     .select()
     .from(plans)
-    .where(and(eq(plans.id, planId), eq(plans.isActive, true)))
+    .where(and(
+      eq(plans.id, planId),
+      eq(plans.isActive, true),
+      eq(plans.planType, 'ai'),
+    ))
     .limit(1);
   if (!plan) throw new CouponValidationError('Plan is unavailable.');
 

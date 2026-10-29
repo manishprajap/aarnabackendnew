@@ -2,6 +2,7 @@ import { and, count, desc, eq, gte, ne } from 'drizzle-orm';
 
 import { db } from '@/db';
 import { adCreatives, plans, products, subscriptions, users } from '@/db/schema';
+import { ensureBusinessWebsiteSchema } from '@/lib/businessWebsite';
 
 export type SubscriptionAccess =
   | {
@@ -22,6 +23,7 @@ export type SubscriptionAccess =
     };
 
 export async function getSubscriptionAccess(userId: number): Promise<SubscriptionAccess> {
+  await ensureBusinessWebsiteSchema();
   const now = new Date();
   const [current] = await db
     .select({
@@ -37,6 +39,7 @@ export async function getSubscriptionAccess(userId: number): Promise<Subscriptio
       and(
         eq(subscriptions.userId, userId),
         eq(subscriptions.status, 'active'),
+        eq(plans.planType, 'ai'),
         gte(subscriptions.endDate, now)
       )
     )
@@ -95,6 +98,7 @@ export async function reserveBannerGeneration(
   userId: number,
   values: Omit<typeof adCreatives.$inferInsert, 'productId'> & { productId: number }
 ) {
+  await ensureBusinessWebsiteSchema();
   return db.transaction(async (tx) => {
     await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for('update');
 
@@ -112,6 +116,7 @@ export async function reserveBannerGeneration(
         and(
           eq(subscriptions.userId, userId),
           eq(subscriptions.status, 'active'),
+          eq(plans.planType, 'ai'),
           gte(subscriptions.endDate, now)
         )
       )

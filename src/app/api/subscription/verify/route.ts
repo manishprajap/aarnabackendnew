@@ -1,9 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import { db } from "@/db";
 import { plans, subscriptions, transactions, users } from "@/db/schema";
 import { getUserIdFromRequest } from "@/lib/auth";
+import { ensureBusinessWebsiteSchema } from "@/lib/businessWebsite";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,7 @@ function safeReturnTo(value: unknown): string {
  */
 export async function POST(request: NextRequest) {
   try {
+    await ensureBusinessWebsiteSchema();
     const userId = await getUserIdFromRequest(request);
     if (!userId) return jsonError("Unauthorized", 401);
 
@@ -129,7 +131,25 @@ export async function POST(request: NextRequest) {
 
     if (!plan) return jsonError("The purchased plan was not found", 404);
 
-    const startDate = new Date();
+    const now = new Date();
+    const [activePeriod] = plan.planType === "website"
+      ? await db
+          .select({ endDate: subscriptions.endDate })
+          .from(subscriptions)
+          .innerJoin(plans, eq(subscriptions.planId, plans.id))
+          .where(and(
+            eq(subscriptions.userId, userId),
+            eq(subscriptions.status, "active"),
+            eq(plans.planType, "website"),
+            gte(subscriptions.endDate, now),
+          ))
+          .orderBy(desc(subscriptions.endDate))
+          .limit(1)
+      : [];
+    const startDate =
+      plan.planType === "website" && activePeriod?.endDate && activePeriod.endDate > now
+        ? activePeriod.endDate
+        : now;
     const durationDays = Math.max(1, Number(plan.durationDays) || 30);
     const endDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
     const normalizedPlan = String(plan.name ?? "pro").trim().toLowerCase();
@@ -152,13 +172,21 @@ export async function POST(request: NextRequest) {
         throw new Error(`Cannot activate a transaction with status ${current.status}`);
       }
 
-      await tx
-        .update(subscriptions)
-        .set({ status: "cancelled", updatedAt: new Date() })
+      const activeIds = await tx
+        .select({ id: subscriptions.id })
+        .from(subscriptions)
+        .innerJoin(plans, eq(subscriptions.planId, plans.id))
         .where(and(
           eq(subscriptions.userId, userId),
           eq(subscriptions.status, "active"),
+          eq(plans.planType, plan.planType),
         ));
+      if (activeIds.length) {
+        await tx
+          .update(subscriptions)
+          .set({ status: "cancelled", updatedAt: new Date() })
+          .where(inArray(subscriptions.id, activeIds.map(({ id }) => id)));
+      }
 
       const inserted = await tx.insert(subscriptions).values({
         userId: Number(userId),
@@ -186,10 +214,12 @@ export async function POST(request: NextRequest) {
         })
         .where(eq(transactions.id, transaction.id));
 
-      await tx
-        .update(users)
-        .set({ plan: normalizedPlan, updatedAt: new Date() })
-        .where(eq(users.id, Number(userId)));
+      if (plan.planType === "ai") {
+        await tx
+          .update(users)
+          .set({ plan: normalizedPlan, updatedAt: new Date() })
+          .where(eq(users.id, Number(userId)));
+      }
     });
 
     return NextResponse.json({

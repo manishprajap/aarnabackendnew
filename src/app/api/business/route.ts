@@ -7,6 +7,7 @@ import path from "node:path";
 import { db } from "@/db";
 import { getUserIdFromRequest, AuthError } from "@/lib/auth";
 import { getUploadPublicPath, getUploadStoragePath } from "@/lib/uploadStorage";
+import { ensureBusinessSlug, ensureBusinessWebsiteSchema } from "@/lib/businessWebsite";
 import { normalizeBannerLanguage } from "@/lib/bannerLanguage";
 import {
   HttpError,
@@ -168,6 +169,7 @@ export async function POST(req: NextRequest) {
 
     step = "ensureSchema";
     await ensureSchema();
+    await ensureBusinessWebsiteSchema();
 
     step = "parseBody";
     let b: Record<string, unknown>;
@@ -321,9 +323,11 @@ export async function POST(req: NextRequest) {
       await saveCustomerTargets(tx, userId, sel.targets.map((t) => t.id));
     });
 
+    const publicSlug = await ensureBusinessSlug(userId, businessName);
     return json({
       success: true,
       customerId: userId,
+      publicSlug,
       saved: {
         services: sel.services,
         targets: sel.targets,

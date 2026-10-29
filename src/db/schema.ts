@@ -34,6 +34,8 @@ export const users = mysqlTable('users', {
   businessAddress: varchar('business_address', { length: 500 }),
   website: varchar('website', { length: 255 }),
   logo: varchar('logo', { length: 255 }),
+  publicSlug: varchar('public_slug', { length: 120 }),
+  websitePublished: boolean('website_published').notNull().default(false),
   professionalPhoto: varchar('professional_photo', { length: 255 }),
   country: varchar('country', { length: 100 }).default('India'),
   state: varchar('state', { length: 100 }),
@@ -311,6 +313,7 @@ export const plans = mysqlTable('plans', {
   features: text('features'),
   durationDays: int('duration_days').notNull().default(30),
   isActive: boolean('is_active').notNull().default(true),
+  planType: varchar('plan_type', { length: 32 }).notNull().default('ai'),
 });
 
 // One row per plan period a user has purchased/is on. The currently active

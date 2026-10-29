@@ -10,8 +10,22 @@ import {
   whatsappCampaignRecipients,
 } from "@/db/schema";
 import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { ensureBusinessWebsiteSchema } from "@/lib/businessWebsite";
 
 export const GRAPH_URL = "https://graph.facebook.com/v20.0";
+
+function getAffectedRows(result: unknown): number | null {
+  const first = Array.isArray(result) ? result[0] : result;
+  if (
+    typeof first === "object" &&
+    first !== null &&
+    "affectedRows" in first &&
+    typeof first.affectedRows === "number"
+  ) {
+    return first.affectedRows;
+  }
+  return null;
+}
 
 /** 10-digit numbers get this country code prefixed. Change/remove if you serve other countries. */
 export const DEFAULT_COUNTRY_CODE = "91";
@@ -49,6 +63,7 @@ export function isPaidSubscriptionPlan(name: string, price: number): boolean {
 }
 
 export async function getPlan(userId: number): Promise<"free" | "pro"> {
+  await ensureBusinessWebsiteSchema();
   const [activeSubscription] = await db
     .select({ name: plans.name, price: plans.price })
     .from(subscriptions)
@@ -57,6 +72,7 @@ export async function getPlan(userId: number): Promise<"free" | "pro"> {
       and(
         eq(subscriptions.userId, userId),
         eq(subscriptions.status, "active"),
+        eq(plans.planType, "ai"),
         gte(subscriptions.endDate, new Date()),
       ),
     )
@@ -202,7 +218,7 @@ export async function dispatchDueCampaigns() {
       .update(c)
       .set({ status: "sending" })
       .where(and(eq(c.id, id), eq(c.status, "scheduled")));
-    if ((res as any).affectedRows === 1) {
+    if (getAffectedRows(res) === 1) {
       started++;
       await dispatchCampaign(id);
     }
