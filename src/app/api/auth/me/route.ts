@@ -6,6 +6,7 @@ import { users, subscriptions, plans, industries, businessCategories } from '@/d
 import { verifyToken } from '@/lib/auth';
 import { getSubscriptionAccess } from '@/lib/subscriptionAccess';
 import { ensureColumns } from '@/lib/onboarding';
+import { isPaidSubscriptionPlan } from '@/lib/whatsappCampaigns';
 
 export const runtime = 'nodejs';
 
@@ -83,6 +84,7 @@ export async function GET(req: NextRequest) {
         endDate: subscriptions.endDate,
         startDate: subscriptions.startDate,
         planName: plans.name,
+        planPrice: plans.price,
         monthlyLimit: plans.posters,
       })
       .from(subscriptions)
@@ -106,9 +108,17 @@ export async function GET(req: NextRequest) {
     const daysRemaining = activeSub?.endDate
       ? Math.max(0, Math.ceil((activeSub.endDate.getTime() - Date.now()) / 86_400_000))
       : null;
+    const isPaidPlan = Boolean(
+      activeSub &&
+      isPaidSubscriptionPlan(activeSub.planName, activeSub.planPrice)
+    );
 
     return json({
-      user: row,
+      user: {
+        ...row,
+        plan: isPaidPlan ? activeSub?.planName ?? 'free' : 'free',
+        isPaidPlan,
+      },
       hasBusiness,
       hasSubscription,
       subscription: activeSub

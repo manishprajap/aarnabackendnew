@@ -43,6 +43,9 @@ export async function POST(
 
     // Respect the one-active-campaign limit on limited plans
     const quota = await computeQuota(userId);
+    if (quota.plan === "free") {
+      return fail("Retrying failed messages is a Pro feature. Upgrade your plan to retry this campaign.", 403);
+    }
     if (quota.activeLimit !== null && quota.activeCount >= quota.activeLimit) {
       return fail(
         "Another campaign is currently active. Wait for it to finish before retrying.",

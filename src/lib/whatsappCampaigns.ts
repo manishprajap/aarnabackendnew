@@ -3,12 +3,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import {
-  users,
+  plans,
+  subscriptions,
   whatsappConnections,
   whatsappCampaigns,
   whatsappCampaignRecipients,
 } from "@/db/schema";
-import { and, eq, inArray, lte, sql, gte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 
 export const GRAPH_URL = "https://graph.facebook.com/v20.0";
 
@@ -23,6 +24,8 @@ export const PLAN_LIMITS = {
 export const ACTIVE_STATUSES = ["scheduled", "sending"] as const;
 
 export type Campaign = typeof whatsappCampaigns.$inferSelect;
+
+const PAID_PLAN_NAMES = new Set(["pro", "paid", "premium", "business", "enterprise"]);
 
 type MetaTemplateResponse = {
   name?: string;
@@ -41,13 +44,29 @@ export const fail = (message: string, status = 400) =>
 
 /* ------------------------------ helpers ------------------------------ */
 
+export function isPaidSubscriptionPlan(name: string, price: number): boolean {
+  return price > 0 || PAID_PLAN_NAMES.has(name.trim().toLowerCase());
+}
+
 export async function getPlan(userId: number): Promise<"free" | "pro"> {
-  const [user] = await db
-    .select({ plan: users.plan })
-    .from(users)
-    .where(eq(users.id, userId))
+  const [activeSubscription] = await db
+    .select({ name: plans.name, price: plans.price })
+    .from(subscriptions)
+    .innerJoin(plans, eq(subscriptions.planId, plans.id))
+    .where(
+      and(
+        eq(subscriptions.userId, userId),
+        eq(subscriptions.status, "active"),
+        gte(subscriptions.endDate, new Date()),
+      ),
+    )
+    .orderBy(desc(subscriptions.endDate))
     .limit(1);
-  return String(user?.plan ?? "free").toLowerCase() === "free" ? "free" : "pro";
+
+  if (!activeSubscription) return "free";
+  return isPaidSubscriptionPlan(activeSubscription.name, activeSubscription.price)
+    ? "pro"
+    : "free";
 }
 
 export function normalizePhone(raw: unknown): string | null {
