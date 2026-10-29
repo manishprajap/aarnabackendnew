@@ -23,6 +23,13 @@ export const ACTIVE_STATUSES = ["scheduled", "sending"] as const;
 
 export type Campaign = typeof whatsappCampaigns.$inferSelect;
 
+type MetaTemplateResponse = {
+  name?: string;
+  language?: string;
+  status?: string;
+  components?: { type?: string; text?: string }[];
+};
+
 /* ------------------------------ responses ------------------------------ */
 
 export const ok = (data: unknown, status = 200) =>
@@ -70,15 +77,16 @@ export function getAccessToken(stored: string): string {
 /** Templates live in Meta. Returns null if it doesn't exist / can't be read. */
 export async function fetchTemplate(templateId: string, accessToken: string) {
   const res = await fetch(
-    `${GRAPH_URL}/${encodeURIComponent(templateId)}?fields=name,language,status`,
+    `${GRAPH_URL}/${encodeURIComponent(templateId)}?fields=name,language,status,components`,
     { headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store" }
   );
-  const body: any = await res.json().catch(() => ({}));
-  if (!res.ok || !body?.name) return null;
+  const body = (await res.json().catch(() => null)) as MetaTemplateResponse | null;
+  if (!res.ok || typeof body?.name !== "string") return null;
   return {
-    name: String(body.name),
-    language: String(body.language ?? "en"),
-    status: String(body.status ?? "").toUpperCase(),
+    name: body.name,
+    language: body.language ?? "en",
+    status: body.status?.toUpperCase() ?? "",
+    components: Array.isArray(body.components) ? body.components : [],
   };
 }
 

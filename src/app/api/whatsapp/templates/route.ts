@@ -72,7 +72,11 @@ function getBodyText(components: MetaComponent[] = []): string {
 }
 
 function getParameterCount(bodyText: string): number {
-  return bodyText.match(/\{\{\s*\d+\s*\}\}/g)?.length ?? 0;
+  const placeholders = Array.from(
+    bodyText.matchAll(/\{\{\s*(\d+)\s*\}\}/g),
+    (match) => Number(match[1]),
+  );
+  return placeholders.length ? Math.max(...placeholders) : 0;
 }
 
 export async function GET(request: NextRequest) {
