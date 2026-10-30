@@ -1,11 +1,16 @@
+// src/app/api/upload/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/db';
-import { products } from '@/db/schema';
+import { products, banners } from '@/db/schema';
 import { createId } from '@paralleldrive/cuid2';
 
 import fs from 'fs/promises';
 import path from 'path';
 import { corsHeaders } from '@/lib/cors';
+import {
+  getUploadPublicPath,
+  getUploadStoragePath,
+} from '@/lib/uploadStorage';
 
 export const runtime = 'nodejs';
 
@@ -13,19 +18,66 @@ export async function OPTIONS(req: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(req.headers.get('origin')) });
 }
 
-const UPLOAD_BASE_DIR =
-  process.env.UPLOAD_DIR || '/var/www/aarnexai.com/aarnexai-backend/upload';
+// banners.day is NOT NULL. Day 0 marks "the user's own uploaded image" so it
+// never collides with the generated campaign banners (day 1, 2, 3 ...).
+// Note: /banners/publish marks every banner with the same productId + day as
+// posted, so keeping this on its own day only affects this one row.
+const ORIGINAL_UPLOAD_BANNER_DAY = 0;
 
-const UPLOAD_URL_PREFIX = '/upload';
+/*
+|--------------------------------------------------------------------------
+| Helpers
+|--------------------------------------------------------------------------
+*/
+
+type ParsedId = { value: number | null; error: string | null };
+
+// Optional numeric id.
+//   empty / missing  -> { value: null, error: null }
+//   valid            -> { value: 12,   error: null }
+//   invalid          -> { value: null, error: '<label> must be a valid number' }
+function parseOptionalId(raw: FormDataEntryValue | null, label: string): ParsedId {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+
+  if (!text) {
+    return { value: null, error: null };
+  }
+
+  const n = Number(text);
+
+  if (!Number.isInteger(n) || n <= 0) {
+    return { value: null, error: `${label} must be a valid number` };
+  }
+
+  return { value: n, error: null };
+}
+
+const optionalText = (raw: FormDataEntryValue | null): string | null =>
+  typeof raw === 'string' ? raw.trim() || null : null;
+
+const isTruthyFlag = (raw: FormDataEntryValue | null): boolean =>
+  typeof raw === 'string' && ['true', '1', 'yes'].includes(raw.trim().toLowerCase());
+
 /*
 |--------------------------------------------------------------------------
 | POST /api/upload
+|
+| Saves the image and creates the product row.
+|
+| If the form field `createBanner=true` is sent, it ALSO creates a row in
+| `banners` pointing at the same image and returns its id as `bannerId`.
+| That is what POST /api/banners/publish needs to post a plain uploaded
+| image to social channels. The normal "Generate Ad" flow does not send
+| the flag, so it behaves exactly as before.
 |--------------------------------------------------------------------------
 */
 
 export async function POST(req: NextRequest) {
   let savedFilePath: string | null = null;
   const origin = req.headers.get('origin');
+
+  const fail = (message: string, status = 400) =>
+    NextResponse.json({ success: false, message }, { status, headers: corsHeaders(origin) });
 
   try {
     const formData = await req.formData();
@@ -37,15 +89,8 @@ export async function POST(req: NextRequest) {
     */
 
     const file = formData.get('image');
-
     const userIdRaw = formData.get('userId');
-    const categoryIdRaw = formData.get('categoryId');
-    const subcategoryIdRaw = formData.get('subcategoryId');
-    const childCategoryIdRaw = formData.get('childCategoryId');
-
-    const promptRaw = formData.get('promptDescription');
-    const promptTypeRaw = formData.get('promptType');
-    const bannerColorRaw = formData.get('bannerColor');
+    const createBanner = isTruthyFlag(formData.get('createBanner'));
 
     /*
     |--------------------------------------------------------------------------
@@ -54,13 +99,7 @@ export async function POST(req: NextRequest) {
     */
 
     if (!(file instanceof File)) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Product image is required',
-        },
-        { status: 400 ,headers: corsHeaders(origin) }
-      );
+      return fail('Product image is required');
     }
 
     /*
@@ -72,123 +111,40 @@ export async function POST(req: NextRequest) {
     const userIdString = String(userIdRaw || '').trim();
 
     if (!userIdString) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'User ID is required',
-        },
-        { status: 400 ,headers: corsHeaders(origin) }
-      );
+      return fail('User ID is required');
     }
 
     const userId = Number(userIdString);
 
     if (!Number.isInteger(userId) || userId <= 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'User ID must be a valid number',
-        },
-        { status: 400 , headers: corsHeaders(origin)}
-      );
+      return fail('User ID must be a valid number');
     }
 
     /*
     |--------------------------------------------------------------------------
-    | Validate category
+    | Optional fields (category ids, prompt, prompt type, banner color)
     |--------------------------------------------------------------------------
     */
 
-    const categoryIdString = String(categoryIdRaw || '').trim();
+    const category = parseOptionalId(formData.get('categoryId'), 'Category ID');
+    if (category.error) return fail(category.error);
 
-    if (!categoryIdString) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Category ID is required',
-        },
-        { status: 400 ,headers: corsHeaders(origin)}
-      );
-    }
+    const subcategory = parseOptionalId(formData.get('subcategoryId'), 'Subcategory ID');
+    if (subcategory.error) return fail(subcategory.error);
 
-    const categoryId = Number(categoryIdString);
+    const childCategory = parseOptionalId(formData.get('childCategoryId'), 'Child Category ID');
+    if (childCategory.error) return fail(childCategory.error);
 
-    if (!Number.isInteger(categoryId) || categoryId <= 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Category ID must be a valid number',
-        },
-        { status: 400 , headers: corsHeaders(origin) }
-      );
-    }
+    const categoryId = category.value;
+    const subcategoryId = subcategory.value;
+    const childCategoryId = childCategory.value;
 
-    /*
-    |--------------------------------------------------------------------------
-    | Subcategory - optional
-    |--------------------------------------------------------------------------
-    */
-
-    let subcategoryId: number | null = null;
-
-    const subcategoryIdString = String(subcategoryIdRaw || '').trim();
-
-    if (subcategoryIdString) {
-      const parsedSubcategoryId = Number(subcategoryIdString);
-
-      if (!Number.isInteger(parsedSubcategoryId) || parsedSubcategoryId <= 0) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: 'Subcategory ID must be a valid number',
-          },
-          { status: 400 , headers: corsHeaders(origin) }
-        );
-      }
-
-      subcategoryId = parsedSubcategoryId;
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Child Category - optional
-    |--------------------------------------------------------------------------
-    */
-
-    let childCategoryId: number | null = null;
-
-    const childCategoryIdString = String(childCategoryIdRaw || '').trim();
-
-    if (childCategoryIdString) {
-      const parsedChildCategoryId = Number(childCategoryIdString);
-
-      if (!Number.isInteger(parsedChildCategoryId) || parsedChildCategoryId <= 0) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: 'Child Category ID must be a valid number',
-          },
-          { status: 400, headers: corsHeaders(origin)}
-        );
-      }
-
-      childCategoryId = parsedChildCategoryId;
-    }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Prompt / Prompt type / Banner color
-    |--------------------------------------------------------------------------
-    */
-
-    const prompt =
-      typeof promptRaw === 'string' ? promptRaw.trim() || null : null;
-
-    const promptType =
-      typeof promptTypeRaw === 'string' ? promptTypeRaw.trim() || null : null;
-
-    const bannerColor =
-      typeof bannerColorRaw === 'string' ? bannerColorRaw.trim() || null : null;
+    const prompt = optionalText(formData.get('promptDescription'));
+    const promptType = optionalText(formData.get('promptType'));
+    const bannerColor = optionalText(formData.get('bannerColor'));
+    // Banner caption: an explicit `caption` field wins; otherwise the
+    // product description (promptDescription) is stored as the caption.
+    const bannerCaption = optionalText(formData.get('caption')) ?? prompt;
 
     /*
     |--------------------------------------------------------------------------
@@ -199,13 +155,7 @@ export async function POST(req: NextRequest) {
     const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
     if (!allowedTypes.includes(file.type)) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Only JPG, PNG and WEBP images are allowed',
-        },
-        { status: 400,headers: corsHeaders(origin) }
-      );
+      return fail('Only JPG, PNG and WEBP images are allowed');
     }
 
     /*
@@ -217,13 +167,7 @@ export async function POST(req: NextRequest) {
     const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
     if (file.size > MAX_FILE_SIZE) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: 'Image size must be less than 10MB',
-        },
-        { status: 400,headers: corsHeaders(origin) }
-      );
+      return fail('Image size must be less than 10MB');
     }
 
     /*
@@ -234,10 +178,7 @@ export async function POST(req: NextRequest) {
     |--------------------------------------------------------------------------
     */
 
-    const uploadDir = path.join(
-      /*turbopackIgnore: true*/ UPLOAD_BASE_DIR,
-      'products'
-    );
+    const uploadDir = getUploadStoragePath('products');
 
     await fs.mkdir(uploadDir, { recursive: true });
 
@@ -282,11 +223,12 @@ export async function POST(req: NextRequest) {
 
     savedFilePath = filePath;
 
-    const imageUrl = `${UPLOAD_URL_PREFIX}/products/${fileName}`;
+    const imageUrl = getUploadPublicPath('products', fileName);
 
     /*
     |--------------------------------------------------------------------------
-    | Database insert
+    | Database insert (product, plus an optional banner) in ONE transaction,
+    | so a failed banner insert never leaves an orphan product row behind.
     |--------------------------------------------------------------------------
     */
 
@@ -302,21 +244,38 @@ export async function POST(req: NextRequest) {
       status: 'processing' as const,
     };
 
-    console.log('PRODUCT INSERT:', insertValues);
+    console.log('PRODUCT INSERT:', { ...insertValues, createBanner });
 
-    const result = await db.insert(products).values(insertValues);
+    const { productId, bannerId } = await db.transaction(async (tx) => {
+      const productResult = await tx.insert(products).values(insertValues);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Get inserted ID
-    |--------------------------------------------------------------------------
-    */
+      const newProductId = productResult[0]?.insertId;
 
-    const productId = result[0]?.insertId;
+      if (!newProductId) {
+        throw new Error('Product was inserted but insertId was not returned');
+      }
 
-    if (!productId) {
-      throw new Error('Product was inserted but insertId was not returned');
-    }
+      let newBannerId: number | null = null;
+
+      if (createBanner) {
+        const bannerResult = await tx.insert(banners).values({
+          productId: newProductId,
+          day: ORIGINAL_UPLOAD_BANNER_DAY,
+          theme: 'Original upload',
+          imageUrl,
+          caption: bannerCaption,
+          posted: false,
+        });
+
+        newBannerId = bannerResult[0]?.insertId ?? null;
+
+        if (!newBannerId) {
+          throw new Error('Banner was inserted but insertId was not returned');
+        }
+      }
+
+      return { productId: newProductId, bannerId: newBannerId };
+    });
 
     /*
     |--------------------------------------------------------------------------
@@ -330,6 +289,7 @@ export async function POST(req: NextRequest) {
         message: 'Product image uploaded successfully',
 
         productId: String(productId),
+        bannerId: bannerId ? String(bannerId) : null,
 
         imageUrl,
 
@@ -344,24 +304,10 @@ export async function POST(req: NextRequest) {
 
         status: 'processing',
       },
-      { status: 201,headers: corsHeaders(origin) }
+      { status: 201, headers: corsHeaders(origin) }
     );
   } catch (error: any) {
-    console.error('========================================');
-    console.error('UPLOAD API ERROR');
-    console.error('========================================');
-    console.error('Error message:', error?.message);
-    console.error('Error code:', error?.code);
-    console.error('Error errno:', error?.errno);
-    console.error('Error sqlMessage:', error?.sqlMessage);
-    console.error('Error sqlState:', error?.sqlState);
-    console.error('Full error:', error);
-
-    /*
-    |--------------------------------------------------------------------------
-    | Remove uploaded file if DB insert failed
-    |--------------------------------------------------------------------------
-    */
+    
 
     if (savedFilePath) {
       try {
@@ -388,7 +334,7 @@ export async function POST(req: NextRequest) {
           sqlState: error?.sqlState || null,
         }),
       },
-      { status: 500,headers: corsHeaders(origin) }
+      { status: 500, headers: corsHeaders(origin) }
     );
   }
 }

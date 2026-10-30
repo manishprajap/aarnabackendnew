@@ -173,6 +173,7 @@ export const products = mysqlTable('products', {
   promptType: varchar('prompt_type', { length: 100 }),
   bannerColor: varchar('banner_color', { length: 20 }),
   status: mysqlEnum('status', ['processing', 'done', 'failed']).default('processing').notNull(),
+  source: varchar("source", { length: 20 }).notNull().default("ai"),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

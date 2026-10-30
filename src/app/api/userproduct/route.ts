@@ -1,4 +1,3 @@
-
 import { NextRequest, NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
@@ -55,6 +54,8 @@ export async function GET(request: NextRequest) {
         description: products.description,
         price: products.price,
         status: products.status,
+        // 'user' = added by the user (catalog), 'ai' = created by the AI ad flow
+        source: products.source,
         createdAt: products.createdAt,
       })
       .from(products)
@@ -137,6 +138,8 @@ export async function POST(request: NextRequest) {
         : null,
       price,
       status: "processing",
+      // This route is only used when the user adds their own product/service.
+      source: "user",
     });
 
     return NextResponse.json(

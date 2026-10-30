@@ -69,6 +69,11 @@ const isTruthyFlag = (raw: FormDataEntryValue | null): boolean =>
 | That is what POST /api/banners/publish needs to post a plain uploaded
 | image to social channels. The normal "Generate Ad" flow does not send
 | the flag, so it behaves exactly as before.
+|
+| If the form field `imageOnly=true` is sent, ONLY the image file is saved
+| and its URL returned. NO product row is created. The "Add Products &
+| Services" popup uses this, then calls POST /api/userproduct which creates
+| the single product row (source = 'user').
 |--------------------------------------------------------------------------
 */
 
@@ -91,6 +96,7 @@ export async function POST(req: NextRequest) {
     const file = formData.get('image');
     const userIdRaw = formData.get('userId');
     const createBanner = isTruthyFlag(formData.get('createBanner'));
+    const imageOnly = isTruthyFlag(formData.get('imageOnly'));
 
     /*
     |--------------------------------------------------------------------------
@@ -227,8 +233,28 @@ export async function POST(req: NextRequest) {
 
     /*
     |--------------------------------------------------------------------------
+    | Image-only mode: return the URL, do NOT create a product row.
+    | (The file is kept; savedFilePath is only used for cleanup on errors.)
+    |--------------------------------------------------------------------------
+    */
+
+    if (imageOnly) {
+      return NextResponse.json(
+        {
+          success: true,
+          message: 'Image uploaded successfully',
+          imageUrl,
+          userId,
+        },
+        { status: 201, headers: corsHeaders(origin) }
+      );
+    }
+
+    /*
+    |--------------------------------------------------------------------------
     | Database insert (product, plus an optional banner) in ONE transaction,
     | so a failed banner insert never leaves an orphan product row behind.
+    | These rows come from the AI ad flow, so source = 'ai'.
     |--------------------------------------------------------------------------
     */
 
@@ -242,6 +268,7 @@ export async function POST(req: NextRequest) {
       bannerColor,
       originalImageUrl: imageUrl,
       status: 'processing' as const,
+      source: 'ai' as const,
     };
 
     console.log('PRODUCT INSERT:', { ...insertValues, createBanner });
@@ -307,8 +334,6 @@ export async function POST(req: NextRequest) {
       { status: 201, headers: corsHeaders(origin) }
     );
   } catch (error: any) {
-    
-
     if (savedFilePath) {
       try {
         await fs.unlink(savedFilePath);
