@@ -153,6 +153,38 @@ const ICONS = {
   briefcase: "M3 8h18v12H3zM8 8V5h8v3M3 13h18",
 };
 
+/* ---------- service icons: picked by keywords in the service name (first match wins) ---------- */
+const SERVICE_ICON_RULES: { test: RegExp; d: string }[] = [
+  { test: /clean|cleans|wash|laundry|housekeep|maid|sanitiz|polish/i, d: "M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8L12 3zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z" },
+  { test: /account|bookkeep|payroll|ledger|tally/i, d: "M6 3h12a1 1 0 011 1v16a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1zM8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01" },
+  { test: /gst|tax|\bitr\b|\btds\b|return/i, d: "M6 3h12v18l-3-2-3 2-3-2-3 2V3zM9 8h6M9 12h6" },
+  { test: /audit|complian|registration|licen[cs]e|certificat|incorporat/i, d: "M7 3h8l4 4v14H7zM10 14l2 2 4-4" },
+  { test: /loan|financ|invest|mutual|credit|bank|fund/i, d: ICONS.rupee },
+  { test: /insur|security|guard|safety/i, d: ICONS.shield },
+  { test: /legal|law|advoc|court|notary|litigation/i, d: "M12 3v18M5 7h14M5 7l-3 7a3 3 0 006 0L5 7zM19 7l-3 7a3 3 0 006 0l-3-7M8 21h8" },
+  { test: /real estate|property|construct|build|interior|architect|renovat|paint/i, d: "M3 11l9-8 9 8M5 10v10h14V10M10 20v-6h4v6" },
+  { test: /doctor|clinic|medic|health|dental|hospital|pharma|therap|ayurved/i, d: "M4 4h16v16H4zM12 8v8M8 12h8" },
+  { test: /school|tuition|educat|coach|train|course|class|learn/i, d: "M2 9l10-5 10 5-10 5L2 9zM6 11v5c0 1.5 3 3 6 3s6-1.5 6-3v-5" },
+  { test: /food|restaurant|cater|cafe|bakery|kitchen|tiffin|meal/i, d: "M7 3v8a2 2 0 002 2v8M11 3v8M7 7h4M17 3c-2 2-2 6 0 8v10" },
+  { test: /car|auto|vehicle|bike|garage|mechanic|taxi|cab/i, d: "M3 13l2-6h14l2 6v4H3v-4zM3 13h18M7 17v2M17 17v2" },
+  { test: /repair|maintenance|service center|fix|hardware|ac |appliance/i, d: "M14.5 6.5a4 4 0 01-5 5L4 17l3 3 5.5-5.5a4 4 0 005-5l-2.5 2.5-2-2L14.5 6.5z" },
+  { test: /electric|wiring|solar|inverter|power/i, d: "M13 2L4 14h7l-1 8 9-12h-7l1-8z" },
+  { test: /plumb|water|pipe|tank|ro /i, d: "M12 3s6 6.5 6 11a6 6 0 01-12 0c0-4.5 6-11 6-11z" },
+  { test: /salon|beauty|hair|spa|makeup|barber|parlou?r|massage/i, d: "M6 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM8.5 7.5L20 18M8.5 16.5L20 6" },
+  { test: /web|software|app|it |digital|seo|develop|design|computer|network/i, d: "M8 8l-4 4 4 4M16 8l4 4-4 4M14 5l-4 14" },
+  { test: /market|advertis|promot|brand|media|campaign/i, d: "M3 11v2a1 1 0 001 1h3l8 4V6L7 10H4a1 1 0 00-1 1zM19 9a4 4 0 010 6" },
+  { test: /photo|video|film|studio|camera/i, d: "M4 7h3l2-3h6l2 3h3v13H4zM12 17a4 4 0 100-8 4 4 0 000 8z" },
+  { test: /event|wedding|party|decor|booking|appoint/i, d: "M4 5h16v15H4zM4 10h16M8 3v4M16 3v4" },
+  { test: /deliver|courier|transport|logistic|packers|movers|shipping/i, d: ICONS.truck },
+  { test: /fitness|gym|yoga|sport|workout/i, d: "M3 9v6M6 7v10M18 7v10M21 9v6M6 12h12" },
+  { test: /pest|termite|fumigat/i, d: "M9 9a3 3 0 016 0v7a3 3 0 01-6 0V9zM3 9l4 2M21 9l-4 2M3 17l4-2M21 17l-4-2M12 6V3" },
+  { test: /travel|tour|trip|visa|hotel|ticket/i, d: ICONS.globe },
+  { test: /support|consult|advice|help/i, d: ICONS.headset },
+];
+
+const getServiceIconPath = (serviceName: string): string =>
+  SERVICE_ICON_RULES.find((r) => r.test.test(serviceName))?.d || ICONS.briefcase;
+
 /* ---------- image with graceful fallback ---------- */
 const SafeImage: React.FC<{ src: string | null; alt: string; size?: number }> = ({
   src,
@@ -902,7 +934,7 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
               {services.map((s) => (
                 <article className="pbw-service" key={s.id}>
                   <span className="pbw-service-icon">
-                    <Icon d={ICONS.briefcase} size={22} />
+                    <Icon d={getServiceIconPath(s.name)} size={22} />
                   </span>
                   <h3>{s.name}</h3>
                   {s.description && <p>{s.description}</p>}
@@ -912,49 +944,6 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
           </div>
         </section>
       )}
-
-      {/* Contact */}
-      <section className="pbw-section" id="contact" style={{ paddingTop: 0 }}>
-        <div className="pbw-container">
-          <div className="pbw-info-card pbw-contact-card">
-            {category && (
-              <div className="pbw-info-row">
-                <span className="pbw-info-icon">
-                  <Icon d={ICONS.store} size={18} />
-                </span>
-                <div>
-                  <small>Business type</small>
-                  <span>{category}</span>
-                </div>
-              </div>
-            )}
-            {site.city && (
-              <div className="pbw-info-row">
-                <span className="pbw-info-icon">
-                  <Icon d={ICONS.pin} size={18} />
-                </span>
-                <div>
-                  <small>Location</small>
-                  <span>{site.city}</span>
-                </div>
-              </div>
-            )}
-            {site.website && (
-              <div className="pbw-info-row">
-                <span className="pbw-info-icon">
-                  <Icon d={ICONS.globe} size={18} />
-                </span>
-                <div>
-                  <small>Website</small>
-                  <a href={websiteHref(site.website)} target="_blank" rel="noreferrer noopener">
-                    {site.website}
-                  </a>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </section>
 
       {/* Products */}
       {products.length > 0 && (
@@ -1040,7 +1029,7 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
       )}
 
       {/* CTA band */}
-      <section className="pbw-cta">
+      <section className="pbw-cta" id="contact">
         <div className="pbw-container">
           <div className="pbw-cta-inner">
             <div>
