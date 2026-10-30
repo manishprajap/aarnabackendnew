@@ -27,6 +27,13 @@ export interface PublicProduct {
   imageUrl: string | null;
 }
 
+export interface PublicService {
+  id: number;
+  name: string;
+  slug: string | null;
+  description: string | null;
+}
+
 export interface PublicSite {
   slug: string | null;
   name: string | null;
@@ -36,6 +43,8 @@ export interface PublicSite {
   logo: string | null;
   /** "About us" text from business_website_contents (null when not written yet). */
   about: string | null;
+  /** Active services of the owner's business category (services.business_category_id). */
+  services: PublicService[];
   products: PublicProduct[];
 }
 
@@ -121,6 +130,61 @@ async function getWebsiteContent(userId: number): Promise<{ about: string | null
   }
 }
 
+/**
+ * Finds the owner's business_category_id.
+ * 1) users.business_category_id (if that column exists)
+ * 2) fallback: match users.business_category (name) against business_categories.name
+ * Both lookups are wrapped in try/catch so a different column name never breaks the page.
+ */
+async function getOwnerBusinessCategoryId(userId: number, categoryName: string | null): Promise<number | null> {
+  try {
+    const result = await db.execute(
+      sql`SELECT business_category_id AS id FROM users WHERE id = ${userId} LIMIT 1`,
+    );
+    const id = Number(rowsOf(result)[0]?.id);
+    if (Number.isFinite(id) && id > 0) return id;
+  } catch {
+    /* column may not exist, use the name fallback */
+  }
+
+  const name = categoryName?.trim();
+  if (!name) return null;
+  try {
+    const result = await db.execute(
+      sql`SELECT id FROM business_categories WHERE LOWER(name) = LOWER(${name}) LIMIT 1`,
+    );
+    const id = Number(rowsOf(result)[0]?.id);
+    return Number.isFinite(id) && id > 0 ? id : null;
+  } catch (error) {
+    console.error("[Public Business Website] could not resolve business category id", error);
+    return null;
+  }
+}
+
+async function getCategoryServices(userId: number, categoryName: string | null): Promise<PublicService[]> {
+  const categoryId = await getOwnerBusinessCategoryId(userId, categoryName);
+  if (!categoryId) return [];
+  try {
+    const result = await db.execute(
+      sql`SELECT id, name, slug, description
+          FROM services
+          WHERE business_category_id = ${categoryId} AND status = 'ACTIVE'
+          ORDER BY name ASC`,
+    );
+    return rowsOf(result)
+      .map((r) => ({
+        id: Number(r.id),
+        name: typeof r.name === "string" ? r.name.trim() : "",
+        slug: typeof r.slug === "string" ? r.slug : null,
+        description: typeof r.description === "string" && r.description.trim() ? r.description.trim() : null,
+      }))
+      .filter((s) => s.name);
+  } catch (error) {
+    console.error("[Public Business Website] could not read services", error);
+    return [];
+  }
+}
+
 function cleanSlug(rawSlug: string): string {
   let slug = rawSlug;
   try {
@@ -173,8 +237,9 @@ export const getPublicBusinessSite = cache(
     const owner = await getPublishedOwner(rawSlug);
     if (!owner) return null;
 
-    const [content, rows] = await Promise.all([
+    const [content, services, rows] = await Promise.all([
       getWebsiteContent(owner.id),
+      getCategoryServices(owner.id, owner.category),
       db
         .select({
           id: products.id,
@@ -208,6 +273,7 @@ export const getPublicBusinessSite = cache(
       website: owner.website,
       logo,
       about: content.about,
+      services,
       products: rows.map((p) => ({
         ...p,
         priceValue: parsePriceValue(p.price),

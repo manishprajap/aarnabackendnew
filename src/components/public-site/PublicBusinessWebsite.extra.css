@@ -1,0 +1,177 @@
+/* Header logo, hero carousel, About (split layout), Services. Loaded LAST (after .store.css). */
+
+/* ---------- header logo: show the whole logo, not a cropped 40px square ---------- */
+.pbw-logo.has-img {
+  width: auto;
+  height: 44px;
+  max-width: 150px;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+.pbw-logo.has-img img {
+  width: auto;
+  height: 100%;
+  max-width: 150px;
+  object-fit: contain;
+}
+
+/* ---------- slider (used in hero and About) ---------- */
+.pbw-slider {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 20px;
+  background: #fff;
+  border: 1px solid var(--pbw-line);
+  box-shadow: var(--pbw-shadow);
+  aspect-ratio: 4 / 3;
+}
+.pbw-slide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity .6s ease;
+  pointer-events: none;
+}
+.pbw-slide.is-active { opacity: 1; pointer-events: auto; }
+.pbw-slide img { width: 100%; height: 100%; object-fit: contain; padding: 12px; }
+.pbw-slide .pbw-ph { color: var(--pbw-green); opacity: .45; }
+
+.pbw-slider-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--pbw-green);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .2);
+}
+.pbw-slider-btn:hover { background: var(--pbw-green-dark); }
+.pbw-slider-btn.prev { left: 12px; }
+.pbw-slider-btn.next { right: 12px; }
+
+.pbw-dots {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+.pbw-dot {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, .25);
+}
+.pbw-dot.is-active { width: 22px; border-radius: 999px; background: var(--pbw-green); }
+
+/* hero: carousel instead of the two tiles; single column when there are no images */
+.pbw-hero-grid.is-single { grid-template-columns: 1fr; }
+.pbw-hero-grid.is-single .pbw-hero-text { max-width: 680px; }
+.pbw-hero-visual.is-slider { display: block; }
+
+/* ---------- About: split layout ---------- */
+.pbw-about-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(24px, 4vw, 56px);
+  align-items: center;
+}
+.pbw-about-split.no-media { grid-template-columns: 1fr; }
+.pbw-about-title { margin-top: 8px; font-size: clamp(1.6rem, 3.4vw, 2.4rem); font-weight: 800; letter-spacing: -0.01em; }
+.pbw-about-lead { margin-top: 14px; font-style: italic; font-size: 1.1rem; line-height: 1.7; color: var(--pbw-ink); }
+.pbw-about-rich { margin-top: 12px; color: var(--pbw-text); line-height: 1.75; font-size: .97rem; }
+.pbw-about-rich p { margin: 0 0 10px; }
+.pbw-about-rich ul { margin: 0 0 10px; padding-left: 20px; }
+.pbw-about-rich strong { color: var(--pbw-ink); }
+
+.pbw-mv { margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.pbw-mv h3 { font-size: 1.35rem; font-weight: 600; margin-bottom: 8px; }
+.pbw-mv p { color: var(--pbw-text); line-height: 1.7; font-size: .92rem; }
+
+.pbw-features {
+  margin-top: clamp(32px, 5vw, 56px);
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 16px;
+}
+.pbw-feature { text-align: center; padding: 8px 4px; }
+.pbw-feature-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 12px;
+  border-radius: 50%;
+  background: var(--pbw-green-soft);
+  color: var(--pbw-green);
+}
+.pbw-feature span { display: block; font-size: .82rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--pbw-ink); }
+
+/* ---------- Services ---------- */
+.pbw-services-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 18px;
+}
+.pbw-service {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  background: #fff;
+  border: 1px solid var(--pbw-line);
+  border-radius: var(--pbw-radius);
+  transition: transform .2s, box-shadow .2s, border-color .2s;
+}
+.pbw-service:hover { transform: translateY(-3px); box-shadow: var(--pbw-shadow); border-color: #cfe9dc; }
+.pbw-service-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--pbw-green-soft);
+  color: var(--pbw-green);
+}
+.pbw-service h3 { font-size: 1.02rem; font-weight: 700; line-height: 1.35; }
+.pbw-service p {
+  font-size: .88rem;
+  line-height: 1.6;
+  color: var(--pbw-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* contact strip */
+.pbw-contact-card { max-width: 720px; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 900px) {
+  .pbw-about-split { grid-template-columns: 1fr; }
+  .pbw-features { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 600px) {
+  .pbw-hero-visual.is-slider { display: block; }
+  .pbw-mv { grid-template-columns: 1fr; gap: 16px; }
+  .pbw-features { grid-template-columns: repeat(2, 1fr); }
+  .pbw-feature-icon { width: 60px; height: 60px; }
+  .pbw-logo.has-img { max-width: 120px; height: 38px; }
+  .pbw-logo.has-img img { max-width: 120px; }
+}

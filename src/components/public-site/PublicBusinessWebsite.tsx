@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { PublicProduct, PublicSite } from "@/lib/publicBusinessSite";
 import "./PublicBusinessWebsite.css";
 import "./PublicBusinessWebsite.store.css";
+import "./PublicBusinessWebsite.extra.css";
 
 /**
  * The backend runs under a Next.js basePath. fetch() does NOT add it automatically,
@@ -34,6 +35,63 @@ const formatMoney = (value: number): string =>
 const titleCase = (s: string | null) => (s || "").replace(/\b\w/g, (c) => c.toUpperCase());
 
 const websiteHref = (w: string) => (/^https?:\/\//i.test(w) ? w : `https://${w}`);
+
+/** Renders **bold** inside a line of text. */
+const renderInline = (text: string): React.ReactNode[] =>
+  text.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+    part.startsWith("**") && part.endsWith("**") && part.length > 4 ? (
+      <strong key={i}>{part.slice(2, -2)}</strong>
+    ) : (
+      <React.Fragment key={i}>{part}</React.Fragment>
+    ),
+  );
+
+/**
+ * Minimal rich text for the About text: blank-line separated paragraphs,
+ * "- item" / "* item" bullet lists and **bold**.
+ */
+const renderRichText = (text: string): React.ReactNode[] => {
+  const blocks: React.ReactNode[] = [];
+  let bullets: string[] = [];
+  let paragraph: string[] = [];
+
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      blocks.push(<p key={`p${blocks.length}`}>{renderInline(paragraph.join(" "))}</p>);
+      paragraph = [];
+    }
+  };
+  const flushBullets = () => {
+    if (bullets.length) {
+      blocks.push(
+        <ul key={`u${blocks.length}`}>
+          {bullets.map((b, i) => (
+            <li key={i}>{renderInline(b)}</li>
+          ))}
+        </ul>,
+      );
+      bullets = [];
+    }
+  };
+
+  text.split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim();
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    if (!line) {
+      flushParagraph();
+      flushBullets();
+    } else if (bullet) {
+      flushParagraph();
+      bullets.push(bullet[1]);
+    } else {
+      flushBullets();
+      paragraph.push(line);
+    }
+  });
+  flushParagraph();
+  flushBullets();
+  return blocks;
+};
 
 /* ---------- Razorpay (loaded on demand) ---------- */
 interface RazorpayInstance {
@@ -84,6 +142,15 @@ const ICONS = {
   image: "M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M9 9.5h.01",
   cart: "M3 4h2l2.4 11.2a1 1 0 001 .8h8.9a1 1 0 001-.8L20 8H6M10 20h.01M17 20h.01",
   check: "M5 13l4 4L19 7",
+  prev: "M15 6l-6 6 6 6",
+  next: "M9 6l6 6-6 6",
+  star: "M12 2l2.9 6.3 6.9.7-5.2 4.6 1.5 6.8L12 17l-6.1 3.4 1.5-6.8L2.2 9l6.9-.7z",
+  shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3zM9 12l2 2 4-4",
+  rupee: "M6 4h12M6 9h12M9 4c5 0 7 2 7 5s-2 5-7 5H6l8 6",
+  headset: "M4 14v-2a8 8 0 0116 0v2M4 14h3v5H4zM17 14h3v5h-3z",
+  truck: "M3 7h11v9H3zM14 10h4l3 3v3h-7M7 19.5h.01M17 19.5h.01",
+  heart: "M12 21s-8-5-8-11a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 10c0 6-8 11-8 11z",
+  briefcase: "M3 8h18v12H3zM8 8V5h8v3M3 13h18",
 };
 
 /* ---------- image with graceful fallback ---------- */
@@ -103,6 +170,71 @@ const SafeImage: React.FC<{ src: string | null; alt: string; size?: number }> = 
   }
   // eslint-disable-next-line @next/next/no-img-element
   return <img src={src} alt={alt} loading="lazy" decoding="async" onError={() => setFailed(true)} />;
+};
+
+/* ---------- auto-running slider (hero banner + About media) ---------- */
+interface SlideImage {
+  src: string;
+  alt: string;
+}
+
+const Slider: React.FC<{ images: SlideImage[]; arrows?: boolean; interval?: number }> = ({
+  images,
+  arrows = false,
+  interval = 3500,
+}) => {
+  const [index, setIndex] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const count = images.length;
+
+  useEffect(() => {
+    if (count < 2 || paused) return;
+    const timer = window.setInterval(() => setIndex((i) => (i + 1) % count), interval);
+    return () => window.clearInterval(timer);
+  }, [count, paused, interval]);
+
+  const go = (next: number) => setIndex((next + count) % count);
+
+  if (count === 0) return null;
+
+  return (
+    <div
+      className="pbw-slider"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onTouchStart={() => setPaused(true)}
+      onTouchEnd={() => setPaused(false)}
+    >
+      {images.map((img, i) => (
+        <div key={`${img.src}-${i}`} className={`pbw-slide${i === index ? " is-active" : ""}`} aria-hidden={i !== index}>
+          <SafeImage src={img.src} alt={img.alt} size={64} />
+        </div>
+      ))}
+      {arrows && count > 1 && (
+        <>
+          <button type="button" className="pbw-slider-btn prev" onClick={() => go(index - 1)} aria-label="Previous slide">
+            <Icon d={ICONS.prev} size={20} />
+          </button>
+          <button type="button" className="pbw-slider-btn next" onClick={() => go(index + 1)} aria-label="Next slide">
+            <Icon d={ICONS.next} size={20} />
+          </button>
+        </>
+      )}
+      {count > 1 && (
+        <div className="pbw-dots">
+          {images.map((_, i) => (
+            <button
+              key={i}
+              type="button"
+              className={`pbw-dot${i === index ? " is-active" : ""}`}
+              onClick={() => go(i)}
+              aria-label={`Go to slide ${i + 1}`}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 };
 
 /* ---------- quantity stepper ---------- */
@@ -171,7 +303,7 @@ const ProductModal: React.FC<{
           </div>
           {description && <p>{description}</p>}
           {features.length > 0 && (
-            <ul className="pbw-features">
+            <ul className="pbw-features-list">
               {features.slice(0, 8).map((f, i) => (
                 <li key={i}>{f}</li>
               ))}
@@ -459,6 +591,16 @@ const CartDrawer: React.FC<{
   );
 };
 
+/* ---------- About feature tiles ---------- */
+const FEATURES: { icon: string; label: string }[] = [
+  { icon: ICONS.star, label: "Quality products" },
+  { icon: ICONS.shield, label: "Secure payments" },
+  { icon: ICONS.rupee, label: "Affordable pricing" },
+  { icon: ICONS.headset, label: "Dedicated support" },
+  { icon: ICONS.truck, label: "Easy ordering" },
+  { icon: ICONS.heart, label: "Customer first" },
+];
+
 /* ---------- main page ---------- */
 const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
   const slug = site.slug || "";
@@ -474,6 +616,7 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
   const [toast, setToast] = useState("");
 
   const products = site.products;
+  const services = site.services || [];
   const productById = useMemo(() => new Map(products.map((p) => [String(p.id), p])), [products]);
   const hasShop = useMemo(() => products.some((p) => p.priceValue), [products]);
 
@@ -570,7 +713,32 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
 
   const name = titleCase(site.name) || "Our Business";
   const category = site.category ? titleCase(site.category) : "";
-  const heroImages = products.filter((p) => p.imageUrl).slice(0, 2);
+
+  /* hero banner: product images only. No images -> the visual is removed. */
+  const heroSlides = useMemo<SlideImage[]>(
+    () =>
+      products
+        .filter((p) => p.imageUrl)
+        .slice(0, 8)
+        .map((p) => ({ src: p.imageUrl as string, alt: p.title || "Product" })),
+    [products],
+  );
+
+  /* About media: logo first, then product images (no duplicates). */
+  const aboutSlides = useMemo<SlideImage[]>(() => {
+    const seen = new Set<string>();
+    const out: SlideImage[] = [];
+    const push = (src: string | null, alt: string) => {
+      if (src && !seen.has(src)) {
+        seen.add(src);
+        out.push({ src, alt });
+      }
+    };
+    push(site.logo, `${name} logo`);
+    products.slice(0, 6).forEach((p) => push(p.imageUrl, p.title || "Product"));
+    return out;
+  }, [site.logo, products, name]);
+
   const intro = [
     category ? `${name} is a trusted ${category.toLowerCase()} business` : `${name} is a local business`,
     site.city ? ` based in ${site.city}.` : ".",
@@ -579,13 +747,22 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
       : " Get in touch to learn more.",
   ].join("");
 
+  /* About text: first paragraph is the highlighted lead, the rest is rich text. */
+  const aboutText = (site.about || "").trim();
+  const aboutParts = aboutText.split(/\r?\n\s*\r?\n/);
+  const aboutLead = aboutText ? aboutParts[0].replace(/\s*\r?\n\s*/g, " ").trim() : intro;
+  const aboutRest = aboutText ? aboutParts.slice(1).join("\n\n") : "";
+
+  const missionText = `Our mission is to provide quality products and reliable services to every ${name} customer, and to build long-term relationships through trust and transparency.`;
+  const visionText = `To be a dependable choice${site.city ? ` in ${site.city}` : ""} by delivering real value, affordable prices and dependable service.`;
+
   return (
     <div className="pbw">
       {/* Header */}
       <header className="pbw-header">
         <div className="pbw-container pbw-header-inner">
           <div className="pbw-brand">
-            <span className="pbw-logo">
+            <span className={`pbw-logo${site.logo ? " has-img" : ""}`}>
               {site.logo ? (
                 <SafeImage src={site.logo} alt={`${name} logo`} size={22} />
               ) : (
@@ -597,6 +774,7 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
           <div className="pbw-header-right">
             <nav className="pbw-nav" aria-label="Sections">
               <a href="#about">About</a>
+              {services.length > 0 && <a href="#services">Services</a>}
               {products.length > 0 && <a href="#products">Products</a>}
               <a href="#contact" className="pbw-nav-cta">
                 Contact
@@ -615,7 +793,7 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
 
       {/* Hero */}
       <section className="pbw-hero">
-        <div className="pbw-container pbw-hero-grid">
+        <div className={`pbw-container pbw-hero-grid${heroSlides.length === 0 ? " is-single" : ""}`}>
           <div>
             {category && <span className="pbw-eyebrow">{category}</span>}
             <h1>{name}</h1>
@@ -647,19 +825,11 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
             </div>
           </div>
 
-          <div className="pbw-hero-visual" aria-hidden="true">
-            {heroImages.length >= 2 ? (
-              heroImages.map((p) => (
-                <div className="pbw-hero-tile" key={p.id}>
-                  <SafeImage src={p.imageUrl} alt="" size={48} />
-                </div>
-              ))
-            ) : (
-              <div className={`pbw-hero-single${site.logo ? " pbw-hero-logo" : ""}`}>
-                {site.logo ? <SafeImage src={site.logo} alt="" size={72} /> : <Icon d={ICONS.store} size={72} />}
-              </div>
-            )}
-          </div>
+          {heroSlides.length > 0 && (
+            <div className="pbw-hero-visual is-slider">
+              <Slider images={heroSlides} />
+            </div>
+          )}
         </div>
       </section>
 
@@ -685,27 +855,68 @@ const PublicBusinessWebsite: React.FC<{ site: PublicSite }> = ({ site }) => {
 
       {/* About */}
       <section className="pbw-section" id="about">
-        <div className="pbw-container pbw-about-grid">
-          <div>
-            <span className="pbw-kicker">About us</span>
-            <h2>Welcome to {name}</h2>
-            {site.logo && (
-              <div className="pbw-about-logo" style={{ marginTop: 16 }}>
-                <SafeImage src={site.logo} alt={`${name} logo`} size={32} />
+        <div className="pbw-container">
+          <div className={`pbw-about-split${aboutSlides.length === 0 ? " no-media" : ""}`}>
+            {aboutSlides.length > 0 && <Slider images={aboutSlides} arrows interval={4000} />}
+            <div>
+              <span className="pbw-kicker">About us</span>
+              <h2 className="pbw-about-title">Welcome to {name}</h2>
+              <p className="pbw-about-lead">{aboutLead}</p>
+              {aboutRest && <div className="pbw-about-rich">{renderRichText(aboutRest)}</div>}
+              <div className="pbw-mv">
+                <div>
+                  <h3>Mission</h3>
+                  <p>{missionText}</p>
+                </div>
+                <div>
+                  <h3>Vision</h3>
+                  <p>{visionText}</p>
+                </div>
               </div>
-            )}
-            {site.about ? (
-              <p className="pbw-about-copy is-pre" style={{ marginTop: site.logo ? 0 : 14 }}>
-                {site.about}
-              </p>
-            ) : (
-              <p className="pbw-about-copy" style={{ marginTop: 14 }}>
-                {intro} We take pride in quality, honest service and a customer-first approach. Explore what we
-                offer below and reach out any time — we would love to help you.
-              </p>
-            )}
+            </div>
           </div>
-          <div className="pbw-info-card" id="contact">
+
+          <div className="pbw-features">
+            {FEATURES.map((f) => (
+              <div className="pbw-feature" key={f.label}>
+                <span className="pbw-feature-icon">
+                  <Icon d={f.icon} size={30} />
+                </span>
+                <span>{f.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Services (from the services table, by the owner's business category) */}
+      {services.length > 0 && (
+        <section className="pbw-section pbw-products" id="services">
+          <div className="pbw-container">
+            <div className="pbw-section-head">
+              <span className="pbw-kicker">What we do</span>
+              <h2>Our Services</h2>
+              <p className="pbw-sub">Services offered by {name}.</p>
+            </div>
+            <div className="pbw-services-grid">
+              {services.map((s) => (
+                <article className="pbw-service" key={s.id}>
+                  <span className="pbw-service-icon">
+                    <Icon d={ICONS.briefcase} size={22} />
+                  </span>
+                  <h3>{s.name}</h3>
+                  {s.description && <p>{s.description}</p>}
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Contact */}
+      <section className="pbw-section" id="contact" style={{ paddingTop: 0 }}>
+        <div className="pbw-container">
+          <div className="pbw-info-card pbw-contact-card">
             {category && (
               <div className="pbw-info-row">
                 <span className="pbw-info-icon">
