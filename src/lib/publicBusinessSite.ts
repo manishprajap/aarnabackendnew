@@ -192,7 +192,7 @@ export const getPublicBusinessSite = cache(
           imageUrl: products.originalImageUrl,
         })
         .from(products)
-        .where(and(eq(products.userId, owner.id), eq(products.status, "done")))
+        .where(and(eq(products.userId, owner.id), eq(products.source, "user")))
         .orderBy(products.createdAt),
     ]);
 

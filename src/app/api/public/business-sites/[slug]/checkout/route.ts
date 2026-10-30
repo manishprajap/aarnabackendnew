@@ -66,7 +66,7 @@ export async function POST(
       .where(
         and(
           eq(products.userId, owner.id),
-          eq(products.status, "done"),
+          eq(products.source, "user"),
           inArray(products.id, Array.from(wanted.keys())),
         ),
       );
