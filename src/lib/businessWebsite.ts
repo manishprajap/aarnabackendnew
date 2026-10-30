@@ -3,6 +3,8 @@ import { db } from "@/db";
 import { plans, subscriptions, users } from "@/db/schema";
 import { ensureColumns, rowsOf } from "@/lib/onboarding";
 
+let businessWebsiteContentSchema: Promise<void> | null = null;
+
 const RESERVED_SLUGS = new Set([
   "login",
   "home",
@@ -47,6 +49,26 @@ export async function ensureBusinessWebsiteSchema() {
       sql.raw("ALTER TABLE users ADD UNIQUE INDEX users_public_slug_unique (public_slug)"),
     );
   }
+}
+
+export async function ensureBusinessWebsiteContentSchema() {
+  if (!businessWebsiteContentSchema) {
+    businessWebsiteContentSchema = db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS business_website_contents (
+        user_id INT NOT NULL PRIMARY KEY,
+        about_us TEXT NOT NULL,
+        logo VARCHAR(255) NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT business_website_contents_user_fk
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `)).then(() => undefined).catch((error: unknown) => {
+      businessWebsiteContentSchema = null;
+      throw error;
+    });
+  }
+  await businessWebsiteContentSchema;
 }
 
 export function slugifyBusinessName(value: string) {

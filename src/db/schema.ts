@@ -67,6 +67,14 @@ export const users = mysqlTable('users', {
   strategyId: bigint('strategy_id', { mode: 'number', unsigned: true }),
 });
 
+export const businessWebsiteContents = mysqlTable('business_website_contents', {
+  userId: int('user_id').notNull().primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  aboutUs: text('about_us').notNull(),
+  logo: varchar('logo', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
+});
+
 export const otps = mysqlTable(
   'otps',
   {
@@ -1324,6 +1332,10 @@ export const festivals = mysqlTable(
 ========================================================= */
 
 export const usersRelations = relations(users, ({ many, one }) => ({
+  businessWebsiteContent: one(businessWebsiteContents, {
+    fields: [users.id],
+    references: [businessWebsiteContents.userId],
+  }),
   products: many(products),
   subscriptions: many(subscriptions),
   transactions: many(transactions),

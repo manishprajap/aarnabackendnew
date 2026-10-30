@@ -1,18 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { products, users } from "@/db/schema";
-import { getActiveBusinessWebsiteSubscription, ensureBusinessWebsiteSchema } from "@/lib/businessWebsite";
+import { businessWebsiteContents, products, users } from "@/db/schema";
+import {
+  ensureBusinessWebsiteContentSchema,
+  getActiveBusinessWebsiteSubscription,
+  ensureBusinessWebsiteSchema,
+} from "@/lib/businessWebsite";
 import { getUploadPublicPath } from "@/lib/uploadStorage";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   try {
     await ensureBusinessWebsiteSchema();
+    await ensureBusinessWebsiteContentSchema();
     const slug = (await params).slug.trim().toLowerCase();
     if (!slug || slug.length > 120) {
       return NextResponse.json({ message: "Business website not found" }, { status: 404 });
@@ -35,6 +40,15 @@ export async function GET(
     if (!user || !(await getActiveBusinessWebsiteSubscription(user.id))) {
       return NextResponse.json({ message: "Business website not found" }, { status: 404 });
     }
+
+    const [websiteContent] = await db
+      .select({
+        aboutUs: businessWebsiteContents.aboutUs,
+        logo: businessWebsiteContents.logo,
+      })
+      .from(businessWebsiteContents)
+      .where(eq(businessWebsiteContents.userId, user.id))
+      .limit(1);
 
     const catalog = await db
       .select({
@@ -66,7 +80,15 @@ export async function GET(
           category: user.category,
           city: user.city,
           website: user.website,
-          logo: user.logo ? getUploadPublicPath(user.logo) : null,
+          aboutUs: websiteContent?.aboutUs ?? null,
+          logo: websiteContent?.logo
+            ? new URL(
+                getUploadPublicPath("business-website", websiteContent.logo),
+                request.nextUrl.origin,
+              ).toString()
+            : user.logo
+              ? new URL(getUploadPublicPath(user.logo), request.nextUrl.origin).toString()
+              : null,
           products: catalog,
         },
       },
