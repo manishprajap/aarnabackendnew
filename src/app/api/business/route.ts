@@ -13,6 +13,7 @@ import {
   HttpError,
   resolveSelections,
   rowsOf,
+  insertIdOf,
   ensureSchema,
   saveCustomerServices,
   saveCustomerTargets,
@@ -117,6 +118,22 @@ export async function GET(req: NextRequest) {
       `)
     ).map((r) => Number(r.service_id));
 
+    const userServices = rowsOf(
+      await db.execute(sql`
+        SELECT s.id, s.name, s.slug, s.description, s.status
+        FROM customer_services cs
+        INNER JOIN services s ON s.id = cs.service_id
+        WHERE cs.customer_id = ${userId}
+        ORDER BY s.name
+      `)
+    ).map((service) => ({
+      id: Number(service.id),
+      name: String(service.name),
+      slug: String(service.slug),
+      description: service.description == null ? null : String(service.description),
+      status: String(service.status),
+    }));
+
     step = "selectTargets";
     const targetIds = rowsOf(
       await db.execute(sql`
@@ -143,6 +160,7 @@ export async function GET(req: NextRequest) {
         industryId: c.industry_id != null ? Number(c.industry_id) : null,
         businessCategoryId: c.business_category_id != null ? Number(c.business_category_id) : null,
         serviceIds,
+        services: userServices,
         targetCustomerIds: targetIds,
         marketingGoal: c.marketing_goal || "",
         automationMode: c.automation_mode || "AUTO",
@@ -211,6 +229,92 @@ export async function POST(req: NextRequest) {
       } catch {
         return json({ success: false, error: "Invalid JSON request body." }, 400);
       }
+    }
+
+    if (b.action === "createService") {
+      const serviceName = str(b.name, 190);
+      const serviceDescription = str(b.description, 5000);
+      if (!serviceName) {
+        return json({ success: false, message: "Service name is required." }, 400);
+      }
+
+      const categoryRow = rowsOf(
+        await db.execute(sql`
+          SELECT business_category_id AS categoryId
+          FROM users
+          WHERE id = ${userId}
+          LIMIT 1
+        `)
+      )[0];
+      const categoryId = Number(categoryRow?.categoryId);
+      if (!Number.isSafeInteger(categoryId) || categoryId <= 0) {
+        return json({
+          success: false,
+          message: "Complete your business category setup before adding a service.",
+        }, 400);
+      }
+
+      const category = rowsOf(
+        await db.execute(sql`
+          SELECT id FROM business_categories
+          WHERE id = ${categoryId} AND status = 'ACTIVE'
+          LIMIT 1
+        `)
+      )[0];
+      if (!category) {
+        return json({
+          success: false,
+          message: "Your business category is unavailable. Update your business profile and try again.",
+        }, 400);
+      }
+
+      const slug = serviceName
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 210)
+        .replace(/-+$/g, "") || "service";
+      const existing = rowsOf(
+        await db.execute(sql`
+          SELECT id FROM services
+          WHERE business_category_id = ${categoryId} AND slug = ${slug}
+          LIMIT 1
+        `)
+      )[0];
+      if (existing) {
+        return json({
+          success: false,
+          message: "A service with this name already exists for your business category.",
+        }, 409);
+      }
+
+      const serviceId = await db.transaction(async (tx) => {
+        const insertedId = insertIdOf(await tx.execute(sql`
+          INSERT INTO services (business_category_id, name, slug, description, status)
+          VALUES (${categoryId}, ${serviceName}, ${slug}, ${serviceDescription || null}, 'ACTIVE')
+        `));
+        if (!insertedId) throw new Error("Service insert did not return a valid ID");
+
+        await tx.execute(sql`
+          INSERT INTO customer_services (customer_id, service_id, is_primary)
+          VALUES (${userId}, ${insertedId}, 0)
+        `);
+        return insertedId;
+      });
+
+      return json({
+        success: true,
+        message: "Service saved successfully",
+        service: {
+          id: serviceId,
+          name: serviceName,
+          slug,
+          description: serviceDescription || null,
+          status: "ACTIVE",
+        },
+      }, 201);
     }
 
     const name = str(b.name, 191);
