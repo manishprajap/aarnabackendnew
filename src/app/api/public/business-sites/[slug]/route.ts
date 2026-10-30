@@ -7,6 +7,24 @@ import { getUploadPublicPath } from "@/lib/uploadStorage";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Turns whatever is stored in the DB (full URL, "/upload/..." path, legacy path,
+ * or a bare file name) into a URL the browser can load.
+ * NOTE: do NOT pass full paths to getUploadPublicPath — it encodes every "/".
+ */
+function toPublicImageUrl(value: string | null | undefined): string | null {
+  const raw = value?.trim();
+  if (!raw) return null;
+  if (/^(https?:)?\/\//i.test(raw)) return raw;
+
+  let p = raw.replace(/^\/aarnexai-backend(?=\/uploads?\/)/, "");
+  p = p.replace(/^\/upload\/upload\//, "/upload/");
+  p = p.replace(/^\/uploads\//, "/upload/");
+  if (p.startsWith("/")) return p;
+
+  return getUploadPublicPath(...p.split("/").filter(Boolean));
+}
+
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ slug: string }> },
@@ -36,7 +54,7 @@ export async function GET(
       return NextResponse.json({ message: "Business website not found" }, { status: 404 });
     }
 
-    const catalog = await db
+    const rows = await db
       .select({
         id: products.id,
         title: products.title,
@@ -58,6 +76,8 @@ export async function GET(
       .where(and(eq(products.userId, user.id), eq(products.status, "done")))
       .orderBy(products.createdAt);
 
+    const catalog = rows.map((p) => ({ ...p, imageUrl: toPublicImageUrl(p.imageUrl) }));
+
     return NextResponse.json(
       {
         site: {
@@ -66,7 +86,7 @@ export async function GET(
           category: user.category,
           city: user.city,
           website: user.website,
-          logo: user.logo ? getUploadPublicPath(user.logo) : null,
+          logo: toPublicImageUrl(user.logo),
           products: catalog,
         },
       },
