@@ -124,10 +124,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const price =
-      body.price === "" || body.price == null
-        ? null
-        : String(body.price);
+    const priceValue = body.price == null ? "" : String(body.price).trim();
+    const numericPrice = Number(priceValue);
+    if (!priceValue || priceValue.length > 100 || !Number.isFinite(numericPrice) || numericPrice < 0) {
+      return NextResponse.json(
+        { success: false, message: "A valid product price is required" },
+        { status: 400 }
+      );
+    }
 
     const [result] = await db.insert(products).values({
       userId: Number(userId),
@@ -136,7 +140,7 @@ export async function POST(request: NextRequest) {
       description: body.description
         ? String(body.description)
         : null,
-      price,
+      price: priceValue,
       status: "processing",
       // This route is only used when the user adds their own product/service.
       source: "user",
